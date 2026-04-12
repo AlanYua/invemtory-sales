@@ -4,11 +4,19 @@
 
 ## 一、Supabase（約 5 分鐘）
 
-1. 註冊 [supabase.com](https://supabase.com/) → **New project**。
-2. 左側 **SQL Editor** → 貼上專案內 `supabase_schema.sql` → **Run**。
-3. **Project Settings → API** 複製：
-   - **Project URL**
-   - **service_role** `secret`（給後端用，勿寫進前端／勿公開在 issue）
+1. 註冊 [supabase.com](https://supabase.com/) → **New project**（等專案建好進 Dashboard）。
+2. **建資料表（這步不會出現任何資料列，很正常）**
+   - 左側選 **SQL Editor**（圖示像 `</>`；新版介面若在左欄最下面找不到，可先點 **Home** 再從選單進 **SQL**）。
+   - **New query**，把本 repo 的 `supabase_schema.sql` **整份貼上** → 右下角 **Run**（或快捷鍵）。
+   - 結果區若顯示 **`Success. No rows returned`** → 代表 `CREATE TABLE` 成功；**不是失敗**，只是建表指令本來就不回傳資料列。
+   - 想確認表有建起來：左側 **Table Editor** → schema **public** → 應看得到 **`app_state`**。
+3. **拿 Project URL 與 service_role（在 Supabase 網頁裡）**
+   - 左下角 **齒輪 Project Settings**（或側欄底部的 **Settings**）點進去。
+   - 左欄選 **Data API** 或 **API**（不同版本名稱二選一，都在 Settings 底下）。
+   - 畫面上方會有 **Project URL**（長得像 `https://xxxx.supabase.co`）→ 複製到 Secrets 的 `SUPABASE_URL`。
+   - 同一頁往下找 **Project API keys**：
+     - **`anon` `public`**：給瀏覽器用的，**我們這個 app 不用**。
+     - **`service_role` `secret`**：點 **Reveal** 才會顯示長 JWT → 複製到 `SUPABASE_SERVICE_ROLE_KEY`（**不要**貼在 GitHub issue、不要 commit）。
 
 ## 二、GitHub
 
@@ -37,15 +45,18 @@ git push -u origin main
 ```toml
 SUPABASE_URL = "https://xxxx.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOi..."
+ADMIN_PASSWORD = "你自己設的強密碼"
 ```
+
+帳號固定 **`admin`**，密碼只寫在 `ADMIN_PASSWORD`（不要 commit 進 repo）。
 
 5. **Manage app → Reboot**（或再 deploy 一次）讓 Secrets 生效。
 
-完成後 Cloud 會給你一個 `https://xxx.streamlit.app` 網址，外人即可上傳 Excel、看報表。
+完成後 Cloud 會給你一個 `https://xxx.streamlit.app` 網址；需 **admin + 密碼** 才能進入上傳／看報表。
 
 ## 注意
 
-- **免費 Cloud app 是公開的**：任何人知道網址都能進（沒登入保護）。若要控管存取需另加 auth 或改私有部署。
+- 這是 **單一帳密 + session**，適合小團隊；防不了會寫腳本撞密碼的攻擊，密碼請設長一點。
 - 上傳單檔預設上限已調為約 200MB（見 `.streamlit/config.toml`）。
 
 ## 本機預覽（可選）

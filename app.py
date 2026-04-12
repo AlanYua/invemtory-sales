@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import os
 
 import pandas as pd
 import streamlit as st
@@ -13,8 +14,46 @@ import persist_sales as ps
 import sales_reports as sr
 import verification as vf
 
+ADMIN_USER = "admin"
+
+
+def _admin_password() -> str:
+    p = os.getenv("ADMIN_PASSWORD", "").strip()
+    if p:
+        return p
+    try:
+        return str(st.secrets.get("ADMIN_PASSWORD", "")).strip()
+    except Exception:
+        return ""
+
 
 st.set_page_config(page_title="庫存查驗 / 銷售統計", layout="wide")
+
+if not st.session_state.get("auth_ok"):
+    st.title("登入")
+    cfg_pw = _admin_password()
+    if not cfg_pw:
+        st.error(
+            "尚未設定密碼：請在 **Streamlit Secrets**（或本機環境變數）加入 `ADMIN_PASSWORD = \"你的密碼\"`。"
+        )
+        st.stop()
+    st.caption(f"帳號固定：**{ADMIN_USER}**（密碼由管理者設定，不寫在程式裡）。")
+    with st.form("login"):
+        u = st.text_input("帳號", value=ADMIN_USER)
+        pw = st.text_input("密碼", type="password")
+        ok = st.form_submit_button("登入")
+    if ok:
+        if u.strip() == ADMIN_USER and pw == cfg_pw:
+            st.session_state.auth_ok = True
+            st.rerun()
+        st.error("帳號或密碼錯誤")
+    st.stop()
+
+with st.sidebar:
+    st.caption(f"已登入：**{ADMIN_USER}**")
+    if st.button("登出"):
+        st.session_state.auth_ok = False
+        st.rerun()
 
 st.title("庫存查驗 / 銷售統計")
 
