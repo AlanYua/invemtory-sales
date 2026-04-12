@@ -33,21 +33,33 @@ def persist_location_label() -> str:
     return "未設定 Supabase（不會持久化；重整後資料不見）"
 
 
+def _normalize_secret(s: object) -> str:
+    """Secrets 常見複製問題：前後空白、整段被多包一層引號、JWT 被換行切斷。"""
+    if s is None:
+        return ""
+    t = str(s).strip().strip("\ufeff")
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        t = t[1:-1].strip()
+    # JWT 不該含空白；若誤貼換行則去掉（仍可能是壞 key，但至少避免單純格式問題）
+    t = "".join(t.split())
+    return t
+
+
 def _get_supabase() -> tuple[str | None, str | None]:
     import os
 
-    u = os.getenv("SUPABASE_URL")
-    k = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    u = _normalize_secret(os.getenv("SUPABASE_URL", ""))
+    k = _normalize_secret(os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
     if u and k:
-        return str(u).rstrip("/"), str(k)
+        return u.rstrip("/"), k
     try:
         import streamlit as st
 
         if hasattr(st, "secrets"):
-            u2 = st.secrets.get("SUPABASE_URL")
-            k2 = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+            u2 = _normalize_secret(st.secrets.get("SUPABASE_URL", ""))
+            k2 = _normalize_secret(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", ""))
             if u2 and k2:
-                return str(u2).rstrip("/"), str(k2)
+                return u2.rstrip("/"), k2
     except Exception:
         pass
     return None, None
@@ -71,6 +83,8 @@ def _cloud_fetch_rows(url: str, key: str) -> list[dict[str, Any]]:
     except urllib.error.HTTPError as e:
         if e.code in (404, 406):
             return []
+        if e.code == 401:
+            raise RuntimeError(_supabase_401_hint()) from e
         raise
 
 
@@ -105,7 +119,22 @@ def _cloud_write_blob(blob: dict[str, Any]) -> None:
         },
         method="POST",
     )
-    urllib.request.urlopen(req, timeout=120)
+    try:
+        urllib.request.urlopen(req, timeout=120)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError(_supabase_401_hint()) from e
+        raise
+
+
+def _supabase_401_hint() -> str:
+    return (
+        "Supabase 回傳 401：幾乎都是 API Key 不對。\n"
+        "到 Supabase → Project Settings → API，複製 service_role 底下那串很長的 secret（JWT，通常 eyJ 開頭），"
+        "貼到 Streamlit Secrets 的 SUPABASE_SERVICE_ROLE_KEY。\n"
+        "不要貼 anon/public 那把；SUPABASE_URL 也要同一個專案的 Project URL。\n"
+        "改完 Secrets 後請 Reboot app。"
+    )
 
 
 def replay_from_batches(batches: list[dict[str, Any]]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
