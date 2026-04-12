@@ -205,6 +205,7 @@ def dataframe_for_pivots(df: pd.DataFrame, *, use_cumulative_raw: bool) -> pd.Da
 # 與資料內「合計」店名／客戶名區隔，避免 pivot 欄名重複
 MARGIN_COL = "列合計"
 MARGIN_ROW = "欄合計"
+REPORT1_PERIOD_SUB = "（週小計）"
 
 
 def ensure_start_report_datetimes(df: pd.DataFrame) -> pd.DataFrame:
@@ -334,8 +335,61 @@ def period_label(row: pd.Series) -> str:
     return f"{s:%Y-%m-%d}~{e:%Y-%m-%d}"
 
 
+def _period_start_ts(period_label: object) -> pd.Timestamp:
+    s = str(period_label).split("~", 1)[0].strip()
+    t = pd.to_datetime(s, errors="coerce")
+    return t if pd.notna(t) else pd.Timestamp.min
+
+
+def _pivot_report1_period_subtotals(p: pd.DataFrame) -> pd.DataFrame:
+    """
+    報表 1：依週區間分塊；每區間內品牌依列合計高到低；區間末加「週小計」列（僅加該週各品牌）。
+    底列欄合計只加總明細列（不含週小計），避免與週小計重複加總。
+    """
+    if p is None or len(p) == 0 or len(p.columns) == 0:
+        return p if p is not None and len(p) else pd.DataFrame()
+    core = p.fillna(0)
+    lev0 = core.index.get_level_values(0).unique()
+    periods = sorted(lev0, key=_period_start_ts)
+    blocks: list[pd.DataFrame] = []
+    sub = REPORT1_PERIOD_SUB
+    for per in periods:
+        m = core.index.get_level_values(0) == per
+        blk = core.loc[m]
+        if len(blk) == 0:
+            continue
+        rt = blk.sum(axis=1)
+        blk_sorted = blk.reindex(index=rt.sort_values(ascending=False).index)
+        blocks.append(blk_sorted)
+        sub_s = blk.sum(axis=0)
+        sub_row = pd.DataFrame(
+            [sub_s.tolist()],
+            columns=core.columns,
+            index=pd.MultiIndex.from_tuples([(per, sub)], names=core.index.names),
+        )
+        blocks.append(sub_row)
+    merged = pd.concat(blocks)
+    is_detail = merged.index.get_level_values(1) != sub
+    col_totals = merged.loc[is_detail].sum(axis=0)
+    col_order = col_totals.sort_values(ascending=False).index
+    merged = merged.reindex(columns=col_order)
+    merged[MARGIN_COL] = merged.sum(axis=1)
+    detail = merged.loc[is_detail]
+    bot: dict[str | object, float] = {
+        c: float(detail[c].sum()) for c in core.columns
+    }
+    bot[MARGIN_COL] = float(detail[MARGIN_COL].sum())
+    nlv = merged.index.nlevels
+    bottom_tuple = (MARGIN_ROW,) if nlv == 1 else tuple("" for _ in range(nlv - 1)) + (MARGIN_ROW,)
+    bottom_df = pd.DataFrame(
+        [bot],
+        index=pd.MultiIndex.from_tuples([bottom_tuple], names=merged.index.names),
+    )
+    return pd.concat([merged, bottom_df])
+
+
 def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """列: 週區間 + brand；欄: customer；值: qty 加總；列／欄合計；列欄依合計由高到低。"""
+    """列: 週區間／品牌，每週末列週小計；欄: customer；底列欄合計僅加明細。"""
     if len(df) == 0:
         return pd.DataFrame()
     d = df.copy()
@@ -349,7 +403,7 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         fill_value=0,
     )
     p.index.names = ["週區間", "品牌"]
-    return sort_and_margin_pivot(p, brand_first=False)
+    return _pivot_report1_period_subtotals(p)
 
 
 def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
