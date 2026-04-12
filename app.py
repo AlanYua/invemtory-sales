@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 
@@ -15,6 +16,28 @@ import sales_reports as sr
 import verification as vf
 
 ADMIN_USER = "admin"
+
+
+def _upload_signature(f: object) -> str:
+    """Streamlit 同一選檔會跨 rerun 保留；用此判斷是否已入庫，避免重複新增批次。"""
+    fid = getattr(f, "file_id", None)
+    if fid:
+        return f"id:{fid}"
+    name = (getattr(f, "name", None) or "").encode()
+    gv = getattr(f, "getvalue", None)
+    if callable(gv):
+        data = gv()
+    else:
+        try:
+            f.seek(0)
+        except Exception:
+            pass
+        data = f.read()
+        try:
+            f.seek(0)
+        except Exception:
+            pass
+    return "h:" + hashlib.sha256(name + data).hexdigest()
 
 
 def _admin_password() -> str:
@@ -157,6 +180,10 @@ with tab_sales:
             "尚未設定 Supabase：上傳／修正／baseline 覆寫都無法寫入雲端（重整後資料不見）。"
         )
     f_sales = st.file_uploader("銷售資料（可多次上傳合併）", type=["xlsx", "xls"], key="sales")
+    st.caption(
+        "選檔後 Streamlit 會保留該檔直到你按上傳器旁的 **清除 (×)**；"
+        "已修正為**同一選檔只會入庫一次**，不會因換頁／重整畫面重複建批次。"
+    )
 
     if "sales_state_initialized" not in st.session_state:
         sdf, mbl, ldg, batches = ps.load_state()
@@ -166,24 +193,30 @@ with tab_sales:
         st.session_state.last_monthly_debug = ldg
         st.session_state.sales_state_initialized = True
 
-    if f_sales:
-        try:
-            raw = pd.read_excel(f_sales)
-            raw = sr.load_sales(raw)
-            nm = getattr(f_sales, "name", "") or ""
-            nb = ps.new_upload_batch(nm, raw)
-            nxt = [*st.session_state.upload_batches, nb]
-            sdf, mbl, ldg = ps.save_state(nxt)
-            st.session_state.upload_batches = nxt
-            st.session_state.sales_df = sdf
-            st.session_state.monthly_baseline = mbl
-            st.session_state.last_monthly_debug = ldg
-            st.success(
-                f"已新增一批：{nm}（raw {len(raw)} 列）；總列數: {len(sdf)}；"
-                f"baseline 鍵數: {len(mbl)}（已同步 Supabase）"
-            )
-        except Exception as e:
-            st.error(str(e))
+    if not f_sales:
+        st.session_state.pop("_sales_ingested_sig", None)
+    else:
+        u_sig = _upload_signature(f_sales)
+        if st.session_state.get("_sales_ingested_sig") != u_sig:
+            try:
+                f_sales.seek(0)
+                raw = pd.read_excel(f_sales)
+                raw = sr.load_sales(raw)
+                nm = getattr(f_sales, "name", "") or ""
+                nb = ps.new_upload_batch(nm, raw)
+                nxt = [*st.session_state.upload_batches, nb]
+                sdf, mbl, ldg = ps.save_state(nxt)
+                st.session_state.upload_batches = nxt
+                st.session_state.sales_df = sdf
+                st.session_state.monthly_baseline = mbl
+                st.session_state.last_monthly_debug = ldg
+                st.session_state["_sales_ingested_sig"] = u_sig
+                st.success(
+                    f"已新增一批：{nm}（raw {len(raw)} 列）；總列數: {len(sdf)}；"
+                    f"baseline 鍵數: {len(mbl)}（已同步 Supabase）"
+                )
+            except Exception as e:
+                st.error(str(e))
 
     with st.expander("上傳批次與修正（傳錯可移除或以新檔取代）", expanded=False):
         batches = st.session_state.upload_batches
@@ -263,24 +296,31 @@ with tab_sales:
                 type=["xlsx", "xls"],
                 key="up_bl",
             )
-            if up_bl:
-                try:
-                    bl = sr.load_monthly_baseline(pd.read_excel(up_bl))
-                    nxt = [
-                        *st.session_state.upload_batches,
-                        ps.new_baseline_override_batch(
-                            getattr(up_bl, "name", "") or "", bl
-                        ),
-                    ]
-                    sdf, mbl, ldg = ps.save_state(nxt)
-                    st.session_state.upload_batches = nxt
-                    st.session_state.sales_df = sdf
-                    st.session_state.monthly_baseline = mbl
-                    st.session_state.last_monthly_debug = ldg
-                    st.success("已追加 baseline 覆寫批次（已同步 Supabase）。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+            if not up_bl:
+                st.session_state.pop("_bl_up_ingested_sig", None)
+            else:
+                bl_sig = _upload_signature(up_bl)
+                if st.session_state.get("_bl_up_ingested_sig") != bl_sig:
+                    try:
+                        if hasattr(up_bl, "seek"):
+                            up_bl.seek(0)
+                        bl = sr.load_monthly_baseline(pd.read_excel(up_bl))
+                        nxt = [
+                            *st.session_state.upload_batches,
+                            ps.new_baseline_override_batch(
+                                getattr(up_bl, "name", "") or "", bl
+                            ),
+                        ]
+                        sdf, mbl, ldg = ps.save_state(nxt)
+                        st.session_state.upload_batches = nxt
+                        st.session_state.sales_df = sdf
+                        st.session_state.monthly_baseline = mbl
+                        st.session_state.last_monthly_debug = ldg
+                        st.session_state["_bl_up_ingested_sig"] = bl_sig
+                        st.success("已追加 baseline 覆寫批次（已同步 Supabase）。")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
 
     if len(df_all) == 0:
         st.info("請上傳至少一個銷售 Excel。")
