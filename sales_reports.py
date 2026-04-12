@@ -191,6 +191,7 @@ def dataframe_for_pivots(df: pd.DataFrame, *, use_cumulative_raw: bool) -> pd.Da
     """報表用 qty：預設為扣過的增量；切換時 monthly 改用累積上傳 raw。"""
     if df is None or len(df) == 0:
         return df
+    df = ensure_start_report_datetimes(df)
     if not use_cumulative_raw:
         return df
     x = df.copy()
@@ -204,6 +205,18 @@ def dataframe_for_pivots(df: pd.DataFrame, *, use_cumulative_raw: bool) -> pd.Da
 MARGINS_NAME = "合計"
 
 
+def ensure_start_report_datetimes(df: pd.DataFrame) -> pd.DataFrame:
+    """Supabase／JSON 還原時日期常為字串，避免對非 datetime 用 .dt 觸發 AttributeError。"""
+    if df is None or len(df) == 0:
+        return df
+    out = df.copy()
+    if "Start_date" in out.columns:
+        out["Start_date"] = pd.to_datetime(out["Start_date"], errors="coerce")
+    if "report_date" in out.columns:
+        out["report_date"] = pd.to_datetime(out["report_date"], errors="coerce")
+    return out
+
+
 def filter_start_report_dates(
     df: pd.DataFrame,
     *,
@@ -215,22 +228,22 @@ def filter_start_report_dates(
     """同時依 Start_date、report_date 區間篩選（依日期，含迄日當天）。"""
     if df is None or len(df) == 0:
         return df
-    d = df
+    d = ensure_start_report_datetimes(df)
+    d = d.dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return d
     sd = d["Start_date"].dt.normalize()
     rd = d["report_date"].dt.normalize()
+    m = pd.Series(True, index=d.index)
     if start_date_from is not None:
-        lo = pd.Timestamp(start_date_from).normalize()
-        d = d[sd >= lo]
+        m &= sd >= pd.Timestamp(start_date_from).normalize()
     if start_date_to is not None:
-        hi = pd.Timestamp(start_date_to).normalize()
-        d = d[sd <= hi]
+        m &= sd <= pd.Timestamp(start_date_to).normalize()
     if report_date_from is not None:
-        lo = pd.Timestamp(report_date_from).normalize()
-        d = d[rd >= lo]
+        m &= rd >= pd.Timestamp(report_date_from).normalize()
     if report_date_to is not None:
-        hi = pd.Timestamp(report_date_to).normalize()
-        d = d[rd <= hi]
-    return d
+        m &= rd <= pd.Timestamp(report_date_to).normalize()
+    return d.loc[m]
 
 
 def filter_brands(df: pd.DataFrame, brands: list[str] | None) -> pd.DataFrame:
