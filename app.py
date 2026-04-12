@@ -44,6 +44,19 @@ def _pivot_for_display(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     else:
         out.columns = [_label(c) for c in out.columns]
 
+    # PyArrow 不允許重複欄名（扁平化 MultiIndex 或資料撞名）
+    seen: dict[str, int] = {}
+    deduped: list[str] = []
+    for c in out.columns:
+        lab = str(c)
+        if lab not in seen:
+            seen[lab] = 0
+            deduped.append(lab)
+        else:
+            seen[lab] += 1
+            deduped.append(f"{lab} ({seen[lab]})")
+    out.columns = deduped
+
     cfg: dict = {}
     for c in out.columns:
         if pd.api.types.is_numeric_dtype(out[c]):
@@ -285,10 +298,6 @@ with tab_sales:
             with st.expander("上一批 monthly 扣減明細", expanded=False):
                 st.dataframe(st.session_state.last_monthly_debug, use_container_width=True)
 
-        sd_min = df_view["Start_date"].min().date()
-        sd_max = df_view["Start_date"].max().date()
-        rd_min = df_view["report_date"].min().date()
-        rd_max = df_view["report_date"].max().date()
         qsum = float(df_view["qty"].sum())
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("總銷量 qty", f"{qsum:,.0f}")
@@ -298,32 +307,29 @@ with tab_sales:
 
         st.subheader("報表查詢")
         st.caption(
-            "依 **Start_date**、**report_date** 起迄篩選（含當天）；三張報表皆套用。報表列／欄皆含**合計**，"
-            "且資料列／欄依**合計由高到低**排序（合計列／欄固定在最後）。"
+            "依 **西曆月份（YYYY/MM）** 多選篩選：列若 **Start_date** 或 **report_date** 任一所屬月份命中即列入。"
+            "三張報表皆套用。右欄為**列合計**、底列為**欄合計**；"
+            "資料列／欄依合計由高到低（總列／欄固定在最後）。"
         )
-        q1, q2 = st.columns(2)
-        with q1:
-            st.markdown("**Start_date**")
-            sda, sdb = st.columns(2)
-            with sda:
-                q_sd0 = st.date_input("起", value=sd_min, key="q_sd0")
-            with sdb:
-                q_sd1 = st.date_input("迄", value=sd_max, key="q_sd1")
-        with q2:
-            st.markdown("**report_date**")
-            rda, rdb = st.columns(2)
-            with rda:
-                q_rd0 = st.date_input("起", value=rd_min, key="q_rd0")
-            with rdb:
-                q_rd1 = st.date_input("迄", value=rd_max, key="q_rd1")
-
-        df_base = sr.filter_start_report_dates(
-            df_view,
-            start_date_from=pd.Timestamp(q_sd0),
-            start_date_to=pd.Timestamp(q_sd1),
-            report_date_from=pd.Timestamp(q_rd0),
-            report_date_to=pd.Timestamp(q_rd1),
-        )
+        dv = sr.ensure_start_report_datetimes(df_view)
+        month_opts: list[str] = []
+        if len(dv):
+            yms: set[str] = set()
+            for _col in ("Start_date", "report_date"):
+                s = dv[_col].dropna()
+                if len(s):
+                    yms.update(s.dt.strftime("%Y/%m").unique().tolist())
+            month_opts = sorted(yms)
+        if month_opts:
+            sel_m = st.multiselect(
+                "查詢月份（YYYY/MM；不選＝全部月份）",
+                options=month_opts,
+                default=[],
+                key="q_months",
+            )
+            df_base = sr.filter_by_year_months(df_view, sel_m if sel_m else None)
+        else:
+            df_base = dv
         st.caption(f"篩選後明細列數：**{len(df_base):,}**（未篩選：{len(df_view):,}）")
 
         all_brands = sorted(df_view["brand"].unique())
@@ -343,7 +349,7 @@ with tab_sales:
         )
 
         with tab_r1:
-            st.caption("列＝週區間／Brand；欄＝ Customer；值＝ qty 加總（列合計欄、欄合計列）。")
+            st.caption("列＝週區間／Brand；欄＝ Customer；值＝ qty 加總；右欄「列合計」、底列「欄合計」。")
             d1, c1 = _pivot_for_display(r1)
             st.dataframe(d1, use_container_width=True, column_config=c1, hide_index=True)
 

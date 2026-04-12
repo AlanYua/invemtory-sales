@@ -202,7 +202,9 @@ def dataframe_for_pivots(df: pd.DataFrame, *, use_cumulative_raw: bool) -> pd.Da
     return x
 
 
-MARGINS_NAME = "合計"
+# 與資料內「合計」店名／客戶名區隔，避免 pivot 欄名重複
+MARGIN_COL = "列合計"
+MARGIN_ROW = "欄合計"
 
 
 def ensure_start_report_datetimes(df: pd.DataFrame) -> pd.DataFrame:
@@ -246,6 +248,24 @@ def filter_start_report_dates(
     return d.loc[m]
 
 
+def filter_by_year_months(df: pd.DataFrame, months: list[str] | None) -> pd.DataFrame:
+    """
+    依西曆月份篩選。months 為 ['2026/04', ...] 格式；None 或 [] 表示不篩（全部）。
+    列入規則：Start_date 或 report_date 所屬 YYYY/MM 任一落在選取月份即保留。
+    """
+    if df is None or len(df) == 0:
+        return df
+    if not months:
+        return ensure_start_report_datetimes(df)
+    d = ensure_start_report_datetimes(df).dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return d
+    sel = set(months)
+    ys = d["Start_date"].dt.strftime("%Y/%m")
+    yr = d["report_date"].dt.strftime("%Y/%m")
+    return d[ys.isin(sel) | yr.isin(sel)]
+
+
 def filter_brands(df: pd.DataFrame, brands: list[str] | None) -> pd.DataFrame:
     if not brands:
         return df
@@ -258,9 +278,10 @@ def filter_customers(df: pd.DataFrame, customers: list[str] | None) -> pd.DataFr
     return df[df["customer"].isin(customers)]
 
 
-def sort_and_margin_pivot(p: pd.DataFrame, *, margins_name: str = MARGINS_NAME) -> pd.DataFrame:
+def sort_and_margin_pivot(p: pd.DataFrame) -> pd.DataFrame:
     """
-    純資料 pivot（無 pandas margins）：列、欄依合計由高到低排序，再補列合計欄與欄合計列。
+    純資料 pivot（無 pandas margins）：列、欄依合計由高到低排序，
+    再補右欄「列合計」與底列「欄合計」。
     """
     if p is None:
         return pd.DataFrame()
@@ -273,13 +294,13 @@ def sort_and_margin_pivot(p: pd.DataFrame, *, margins_name: str = MARGINS_NAME) 
     col_idx = col_totals.sort_values(ascending=False).index
     core = core.reindex(index=row_idx).reindex(columns=col_idx)
     out = core.copy()
-    out[margins_name] = core.sum(axis=1)
+    out[MARGIN_COL] = core.sum(axis=1)
     nlv = core.index.nlevels
     if nlv == 0:
         return out
-    bottom_tuple = (margins_name,) if nlv == 1 else tuple("" for _ in range(nlv - 1)) + (margins_name,)
+    bottom_tuple = (MARGIN_ROW,) if nlv == 1 else tuple("" for _ in range(nlv - 1)) + (MARGIN_ROW,)
     bot: dict = {c: float(core[c].sum()) for c in core.columns}
-    bot[margins_name] = float(out[margins_name].sum())
+    bot[MARGIN_COL] = float(out[MARGIN_COL].sum())
     bottom_df = pd.DataFrame(
         [bot],
         index=pd.MultiIndex.from_tuples([bottom_tuple], names=core.index.names),
