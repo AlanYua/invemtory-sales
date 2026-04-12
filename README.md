@@ -37,10 +37,25 @@ git push -u origin main
 
 ## 三、Streamlit Community Cloud
 
-1. 開 [share.streamlit.io](https://share.streamlit.io/)，用 GitHub 登入。
-2. **New app** → 選你的 repo / **main** branch。
-3. **Main file path** 填：`app.py` → **Deploy**。
-4. App 頁面 → **⋮ → Settings → Secrets**，貼上（換成你的值）：
+**前提**：下面「選 repo」前，請先做完 **二、GitHub** 把程式 **push 上去**，否則清單裡看不到你的專案。
+
+1. 開 [share.streamlit.io](https://share.streamlit.io/) → 用 **GitHub 登入**（或註冊綁 GitHub）。
+2. **註冊／登入後**：
+   - 若跳出 **Authorize streamlit**（授權 Streamlit 讀你的 GitHub repo）→ **Authorize** 按下去（不授權就選不到 repo）。
+   - 進到主畫面後，右上角或中間找 **「Create app」／「New app」**（介面改版時字可能略有不同，都是「新建一個要跑的 app」）。
+3. **部署表單**（介面預設常是 `master` + `streamlit_app.py`，請改掉）：
+   - **Repository（儲存庫）** 要填的是 **GitHub 上的「擁有者/倉庫名」**，不是本機資料夾路徑。
+     - 到瀏覽器開你的倉庫首頁，網址長這樣：`https://github.com/擁有者/倉庫名` → 你要填的就是 **`擁有者/倉庫名`**（中間一條斜線、**沒有** `https://`）。
+     - 例：網址是 `https://github.com/yuanguoting/Invemtory-Sales` → 填 **`yuanguoting/Invemtory-Sales`**。
+     - 表單旁若有 **「貼上 GitHub URL」**：可貼整條 `https://github.com/.../...`，它會幫你拆好。
+     - **下拉是空的／找不到自己的 repo**：多半是還沒 push、或 Streamlit 沒被授權讀到該倉庫。請到 GitHub 右上角 **頭像 → Settings → Applications → Installed GitHub Apps → Streamlit Cloud**（名稱可能略有差異）→ **Configure**，把要部署的 **organization / repository 存取權** 打開；存檔後回 Streamlit 重新整理再選。
+   - **Branch**：多數新 repo 是 **`main`**；若紅字「分支不存在」→ 到 GitHub 倉庫看分支下拉實際名稱再填。
+   - **Main file path**：本專案填 **`app.py`**（不是 `streamlit_app.py`，除非你有改名）。
+   - 按 **Deploy**，等 build 跑完（第一次約 1～3 分鐘）。
+4. 部署成功後，瀏覽器網址會變成 **`https://xxx.streamlit.app`** 這類網址（可先打開確認會出現登入頁；此時還沒設 Secrets 可能會報錯，正常）。
+5. 在 **該 app 頁面**（不是你的 GitHub）：
+   - 右上角 **⋮**（三點）→ **Settings** → 左欄或分頁找 **Secrets**。
+   - 貼上（換成你的值）：
 
 ```toml
 SUPABASE_URL = "https://xxxx.supabase.co"
@@ -50,9 +65,9 @@ ADMIN_PASSWORD = "你自己設的強密碼"
 
 帳號固定 **`admin`**，密碼只寫在 `ADMIN_PASSWORD`（不要 commit 進 repo）。
 
-5. **Manage app → Reboot**（或再 deploy 一次）讓 Secrets 生效。
+6. **Manage app → Reboot**（或 **Redeploy**／再按一次 Deploy）讓 Secrets 生效。
 
-完成後 Cloud 會給你一個 `https://xxx.streamlit.app` 網址；需 **admin + 密碼** 才能進入上傳／看報表。
+完成後用 **`https://xxx.streamlit.app`** 開啟；需 **admin + 密碼** 才能進入上傳／看報表。
 
 ## 注意
 
