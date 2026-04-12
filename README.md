@@ -49,7 +49,10 @@ git push -u origin main
      - 例：網址是 `https://github.com/yuanguoting/Invemtory-Sales` → 填 **`yuanguoting/Invemtory-Sales`**。
      - 表單旁若有 **「貼上 GitHub URL」**：可貼整條 `https://github.com/.../...`，它會幫你拆好。
      - **下拉是空的／找不到自己的 repo**：多半是還沒 push、或 Streamlit 沒被授權讀到該倉庫。請到 GitHub 右上角 **頭像 → Settings → Applications → Installed GitHub Apps → Streamlit Cloud**（名稱可能略有差異）→ **Configure**，把要部署的 **organization / repository 存取權** 打開；存檔後回 Streamlit 重新整理再選。
-   - **Branch**：多數新 repo 是 **`main`**；若紅字「分支不存在」→ 到 GitHub 倉庫看分支下拉實際名稱再填。
+   - **Branch**：多數新 repo 是 **`main`**；若紅字「分支不存在」→ 到 GitHub 倉庫 **Code** 頁左上角分支下拉看實際名稱再填。
+     - 若仍失敗：本 repo 已同時有 **`main`** 與 **`master`**（內容相同），部署表單可改試 **`master`**。
+     - **應用網址（可選）** 請先**留空**用預設網址；自訂子網域有時會讓表單驗證怪掉。
+     - 仍不行：GitHub **Settings → Applications → Installed GitHub Apps → Streamlit** → **Configure**，確認已勾到此倉庫；再到 Streamlit **登出再登入**，或換無痕視窗重填。
    - **Main file path**：本專案填 **`app.py`**（不是 `streamlit_app.py`，除非你有改名）。
    - 按 **Deploy**，等 build 跑完（第一次約 1～3 分鐘）。
 4. 部署成功後，瀏覽器網址會變成 **`https://xxx.streamlit.app`** 這類網址（可先打開確認會出現登入頁；此時還沒設 Secrets 可能會報錯，正常）。
