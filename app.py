@@ -354,7 +354,10 @@ with tab_sales:
             st.dataframe(d1, use_container_width=True, column_config=c1, hide_index=True)
 
         with tab_r2:
-            st.caption("列＝ Brand／EAN／Name；欄＝ Customer（跨 store 加總）；值＝ qty。")
+            st.caption(
+                "列＝ Brand／EAN／Name；欄＝ Customer（跨 store 加總）；值＝ qty。"
+                "列順序：**品牌依小計由高到低**，同品牌內品項再依**列合計由高到低**；欄依欄合計由高到低。"
+            )
             d2, c2 = _pivot_for_display(r2)
             st.dataframe(d2, use_container_width=True, column_config=c2, hide_index=True)
 
@@ -362,6 +365,7 @@ with tab_sales:
             st.caption(
                 "列＝ Brand／EAN／Name；欄＝ Store（僅選一個或篩後只剩一客戶時）；"
                 "若未選 Customer 或選多個客戶，欄為 **customer — store** 以免店名重複。"
+                "列順序：**品牌依小計由高到低**，同品牌內品項再依**列合計由高到低**；欄依欄合計由高到低。"
             )
             d3, c3 = _pivot_for_display(r3)
             st.dataframe(d3, use_container_width=True, column_config=c3, hide_index=True)

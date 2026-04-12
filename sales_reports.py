@@ -278,9 +278,11 @@ def filter_customers(df: pd.DataFrame, customers: list[str] | None) -> pd.DataFr
     return df[df["customer"].isin(customers)]
 
 
-def sort_and_margin_pivot(p: pd.DataFrame) -> pd.DataFrame:
+def sort_and_margin_pivot(p: pd.DataFrame, *, brand_first: bool = False) -> pd.DataFrame:
     """
-    純資料 pivot（無 pandas margins）：列、欄依合計由高到低排序，
+    純資料 pivot（無 pandas margins）：欄依欄合計由高到低排序；
+    列預設依列合計由高到低；brand_first=True 時先依第一層 index（品牌）的**品牌小計**
+    （該品牌所有列合計加總）由高到低排品牌，同品牌內再依各列合計由高到低。
     再補右欄「列合計」與底列「欄合計」。
     """
     if p is None:
@@ -290,7 +292,25 @@ def sort_and_margin_pivot(p: pd.DataFrame) -> pd.DataFrame:
     core = p.fillna(0)
     row_totals = core.sum(axis=1)
     col_totals = core.sum(axis=0)
-    row_idx = row_totals.sort_values(ascending=False).index
+    if brand_first and core.index.nlevels >= 1:
+        tmp = row_totals.reset_index(name="__tot")
+        brand_col = tmp.columns[0]
+        brand_order = (
+            tmp.groupby(brand_col, sort=False)["__tot"]
+            .sum()
+            .sort_values(ascending=False)
+            .index
+        )
+        b_rank = {b: i for i, b in enumerate(brand_order)}
+        tmp["__b_rank"] = tmp[brand_col].map(b_rank)
+        tmp = tmp.sort_values(
+            by=["__b_rank", "__tot"],
+            ascending=[True, False],
+            kind="mergesort",
+        )
+        row_idx = pd.MultiIndex.from_frame(tmp.drop(columns=["__tot", "__b_rank"]))
+    else:
+        row_idx = row_totals.sort_values(ascending=False).index
     col_idx = col_totals.sort_values(ascending=False).index
     core = core.reindex(index=row_idx).reindex(columns=col_idx)
     out = core.copy()
@@ -329,11 +349,11 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         fill_value=0,
     )
     p.index.names = ["週區間", "品牌"]
-    return sort_and_margin_pivot(p)
+    return sort_and_margin_pivot(p, brand_first=False)
 
 
 def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """列: brand, EAN, Name；欄: customer（跨 store 加總）；值: qty；列／欄合計；由高到低。"""
+    """列: brand, EAN, Name；欄: customer（跨 store 加總）；值: qty；品牌依小計高到低、同品牌內列合計高到低；欄依欄合計。"""
     if len(df) == 0:
         return pd.DataFrame()
     p = pd.pivot_table(
@@ -344,14 +364,14 @@ def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
         aggfunc="sum",
         fill_value=0,
     )
-    return sort_and_margin_pivot(p)
+    return sort_and_margin_pivot(p, brand_first=True)
 
 
 def report3_pivot(df: pd.DataFrame) -> pd.DataFrame:
     """
     列: brand, EAN, Name；值: qty。
     僅一個 customer 時欄為 store；多 customer 時欄為 customer + store（避免店名重複）。
-    列／欄合計；由高到低。
+    品牌依小計高到低、同品牌內列合計高到低；欄依欄合計。
     """
     if len(df) == 0:
         return pd.DataFrame()
@@ -365,7 +385,7 @@ def report3_pivot(df: pd.DataFrame) -> pd.DataFrame:
         aggfunc="sum",
         fill_value=0,
     )
-    return sort_and_margin_pivot(p)
+    return sort_and_margin_pivot(p, brand_first=True)
 
 
 def filter_by_report_date(
