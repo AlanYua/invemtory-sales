@@ -142,13 +142,15 @@ def replay_from_batches(batches: list[dict[str, Any]]) -> tuple[pd.DataFrame, pd
     baseline = _empty_baseline()
     parts: list[pd.DataFrame] = []
     last_dbg = pd.DataFrame()
-    for b in batches:
+    for seq, b in enumerate(batches):
         kind = b.get("kind") or "upload"
         if kind == "snapshot":
             s = b.get("sales_df")
             bl = b.get("monthly_baseline")
             if isinstance(s, pd.DataFrame) and len(s):
-                parts.append(s.copy())
+                snap = s.copy()
+                snap["_replay_seq"] = seq
+                parts.append(snap)
             if isinstance(bl, pd.DataFrame) and len(bl.columns):
                 baseline = bl.copy()
             continue
@@ -161,11 +163,24 @@ def replay_from_batches(batches: list[dict[str, Any]]) -> tuple[pd.DataFrame, pd
         if not isinstance(raw, pd.DataFrame) or len(raw) == 0:
             continue
         out, baseline, dbg = sr.integrate_monthly_vs_baseline(raw, baseline)
+        out = out.copy()
+        out["_replay_seq"] = seq
         parts.append(out)
         last_dbg = dbg
     if not parts:
         return pd.DataFrame(), baseline, last_dbg
     sales_df = pd.concat(parts, ignore_index=True)
+    # 舊版 snapshot 已含全量明細，若再重傳同一 Excel，concat 會變雙倍。
+    # 同一業務鍵（不含 qty）保留「較後面的批次」；同鍵不同 qty 視為修正亦保留最後一筆。
+    if len(sales_df) and "_replay_seq" in sales_df.columns:
+        sales_df = sr.ensure_start_report_datetimes(sales_df)
+        biz_keys = [c for c in sr.SALES_COLS if c != "qty"]
+        for c in ["qty_kind", "customer", "brand", "EAN", "Name", "store"]:
+            if c in sales_df.columns:
+                sales_df[c] = sales_df[c].astype(str).str.strip()
+        sales_df = sales_df.sort_values("_replay_seq", kind="mergesort")
+        sales_df = sales_df.loc[~sales_df.duplicated(subset=biz_keys, keep="last")].copy()
+        sales_df = sales_df.drop(columns=["_replay_seq"])
     return sales_df, baseline, last_dbg
 
 
