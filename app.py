@@ -27,6 +27,30 @@ def _admin_password() -> str:
         return ""
 
 
+def _pivot_for_display(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Pivot 表：reset_index、扁平化欄名，並產生數字欄的千分位 column_config。"""
+    if df is None or len(df) == 0:
+        return df, {}
+
+    def _label(col: object) -> str:
+        if isinstance(col, tuple):
+            parts = [str(x).strip() for x in col if str(x).strip() not in ("", "None", "<NA>")]
+            return " — ".join(parts) if parts else "欄"
+        return str(col)
+
+    out = df.reset_index()
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = [_label(c) for c in out.columns]
+    else:
+        out.columns = [_label(c) for c in out.columns]
+
+    cfg: dict = {}
+    for c in out.columns:
+        if pd.api.types.is_numeric_dtype(out[c]):
+            cfg[c] = st.column_config.NumberColumn(str(c), format="%,.0f")
+    return out, cfg
+
+
 st.set_page_config(page_title="庫存查驗 / 銷售統計", layout="wide")
 
 if not st.session_state.get("auth_ok"):
@@ -261,55 +285,95 @@ with tab_sales:
             with st.expander("上一批 monthly 扣減明細", expanded=False):
                 st.dataframe(st.session_state.last_monthly_debug, use_container_width=True)
 
-        dmin, dmax = df_all["report_date"].min(), df_all["report_date"].max()
-        st.caption(f"report_date 範圍: {dmin.date()} ~ {dmax.date()}")
+        sd_min = df_view["Start_date"].min().date()
+        sd_max = df_view["Start_date"].max().date()
+        rd_min = df_view["report_date"].min().date()
+        rd_max = df_view["report_date"].max().date()
+        qsum = float(df_view["qty"].sum())
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("總銷量 qty", f"{qsum:,.0f}")
+        m2.metric("明細列數", f"{len(df_view):,}")
+        m3.metric("品牌數", f"{df_view['brand'].nunique():,}")
+        m4.metric("客戶數", f"{df_view['customer'].nunique():,}")
 
-        st.subheader("報表 1：列＝週區間／品牌；欄＝customer；值＝qty")
-        r1 = sr.report1_pivot(df_view)
-        st.dataframe(r1, use_container_width=True)
+        st.subheader("報表查詢")
+        st.caption(
+            "依 **Start_date**、**report_date** 起迄篩選（含當天）；三張報表皆套用。報表列／欄皆含**合計**，"
+            "且資料列／欄依**合計由高到低**排序（合計列／欄固定在最後）。"
+        )
+        q1, q2 = st.columns(2)
+        with q1:
+            st.markdown("**Start_date**")
+            sda, sdb = st.columns(2)
+            with sda:
+                q_sd0 = st.date_input("起", value=sd_min, key="q_sd0")
+            with sdb:
+                q_sd1 = st.date_input("迄", value=sd_max, key="q_sd1")
+        with q2:
+            st.markdown("**report_date**")
+            rda, rdb = st.columns(2)
+            with rda:
+                q_rd0 = st.date_input("起", value=rd_min, key="q_rd0")
+            with rdb:
+                q_rd1 = st.date_input("迄", value=rd_max, key="q_rd1")
 
-        st.subheader("報表 2：時間篩選；列 brand／EAN／Name（全 0 品項已隱藏）；含合計")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            t0 = st.date_input("report_date 起", value=dmin.date(), key="r2s")
-        with col_b:
-            t1 = st.date_input("report_date 迄", value=dmax.date(), key="r2e")
-        mask_df = sr.filter_by_report_date(
+        df_base = sr.filter_start_report_dates(
             df_view,
-            pd.Timestamp(t0),
-            pd.Timestamp(t1),
+            start_date_from=pd.Timestamp(q_sd0),
+            start_date_to=pd.Timestamp(q_sd1),
+            report_date_from=pd.Timestamp(q_rd0),
+            report_date_to=pd.Timestamp(q_rd1),
         )
-        r2 = sr.report2_pivot(mask_df)
-        st.dataframe(r2, use_container_width=True)
-        st.caption("依品牌收折")
-        for brand in sorted(mask_df["brand"].unique()):
-            with st.expander(f"品牌: {brand}", expanded=False):
-                sub = mask_df[mask_df["brand"] == brand]
-                st.dataframe(sr.report2_pivot(sub), use_container_width=True)
-        st.caption("依 customer 收折（欄為 store）")
-        for cust in sorted(mask_df["customer"].unique()):
-            with st.expander(f"Customer: {cust}", expanded=False):
-                subc = mask_df[mask_df["customer"] == cust]
-                st.dataframe(sr.report2_pivot_by_customer(subc), use_container_width=True)
+        st.caption(f"篩選後明細列數：**{len(df_base):,}**（未篩選：{len(df_view):,}）")
 
-        st.subheader("報表 3：Brand 篩選；列 EAN／Name；欄 customer（店舖已加總）")
-        brands = sorted(df_view["brand"].unique())
-        pick = st.multiselect("選品牌（可多選；不選＝全部）", brands, default=[])
-        r3 = sr.report3_pivot(df_view, pick if pick else None)
-        st.dataframe(r3, use_container_width=True)
+        all_brands = sorted(df_view["brand"].unique())
+        all_customers = sorted(df_view["customer"].unique())
+        br12 = st.multiselect("品牌（報表 1、2；不選＝全部）", all_brands, default=[], key="br12")
+        df_r12 = sr.filter_brands(df_base, br12 or None)
+        br3 = st.multiselect("品牌（報表 3；不選＝全部）", all_brands, default=[], key="br3")
+        cu3 = st.multiselect("Customer（報表 3；不選＝全部）", all_customers, default=[], key="cu3")
+        df_r3 = sr.filter_customers(sr.filter_brands(df_base, br3 or None), cu3 or None)
 
-        xl = sr.to_excel_bytes(
-            {
-                "report1": r1.reset_index(),
-                "report2_filtered": sr.report2_pivot(mask_df).reset_index(),
-                "report3": r3.reset_index(),
-                "monthly_baseline": st.session_state.monthly_baseline,
-                "last_upload_monthly_debug": st.session_state.last_monthly_debug,
-            }
+        r1 = sr.report1_pivot(df_r12)
+        r2 = sr.report2_pivot(df_r12)
+        r3 = sr.report3_pivot(df_r3)
+
+        tab_r1, tab_r2, tab_r3, tab_dl = st.tabs(
+            ["報表 1", "報表 2", "報表 3", "匯出 xlsx"]
         )
-        st.download_button(
-            "下載三張報表（同一個 xlsx 多 sheet）",
-            data=xl,
-            file_name="sales_reports.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+
+        with tab_r1:
+            st.caption("列＝週區間／Brand；欄＝ Customer；值＝ qty 加總（列合計欄、欄合計列）。")
+            d1, c1 = _pivot_for_display(r1)
+            st.dataframe(d1, use_container_width=True, column_config=c1, hide_index=True)
+
+        with tab_r2:
+            st.caption("列＝ Brand／EAN／Name；欄＝ Customer（跨 store 加總）；值＝ qty。")
+            d2, c2 = _pivot_for_display(r2)
+            st.dataframe(d2, use_container_width=True, column_config=c2, hide_index=True)
+
+        with tab_r3:
+            st.caption(
+                "列＝ Brand／EAN／Name；欄＝ Store（僅選一個或篩後只剩一客戶時）；"
+                "若未選 Customer 或選多個客戶，欄為 **customer — store** 以免店名重複。"
+            )
+            d3, c3 = _pivot_for_display(r3)
+            st.dataframe(d3, use_container_width=True, column_config=c3, hide_index=True)
+
+        with tab_dl:
+            st.caption("與上方「報表查詢」條件一致。")
+            xl = sr.to_excel_bytes(
+                {
+                    "report1": r1.reset_index(),
+                    "report2": r2.reset_index(),
+                    "report3": r3.reset_index(),
+                    "monthly_baseline": st.session_state.monthly_baseline,
+                    "last_upload_monthly_debug": st.session_state.last_monthly_debug,
+                }
+            )
+            st.download_button(
+                "下載報表 1～3（同一個 xlsx 多 sheet）",
+                data=xl,
+                file_name="sales_reports.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )

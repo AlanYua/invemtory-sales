@@ -1,4 +1,4 @@
-"""銷售統計：讀取上傳資料並產生三種報表與 Excel 匯出。"""
+"""銷售統計：讀取上傳資料並產生報表 1～3（列／欄合計、依合計排序）與 Excel 匯出。"""
 from __future__ import annotations
 
 import pandas as pd
@@ -204,6 +204,76 @@ def dataframe_for_pivots(df: pd.DataFrame, *, use_cumulative_raw: bool) -> pd.Da
 MARGINS_NAME = "合計"
 
 
+def filter_start_report_dates(
+    df: pd.DataFrame,
+    *,
+    start_date_from: pd.Timestamp | None = None,
+    start_date_to: pd.Timestamp | None = None,
+    report_date_from: pd.Timestamp | None = None,
+    report_date_to: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """同時依 Start_date、report_date 區間篩選（依日期，含迄日當天）。"""
+    if df is None or len(df) == 0:
+        return df
+    d = df
+    sd = d["Start_date"].dt.normalize()
+    rd = d["report_date"].dt.normalize()
+    if start_date_from is not None:
+        lo = pd.Timestamp(start_date_from).normalize()
+        d = d[sd >= lo]
+    if start_date_to is not None:
+        hi = pd.Timestamp(start_date_to).normalize()
+        d = d[sd <= hi]
+    if report_date_from is not None:
+        lo = pd.Timestamp(report_date_from).normalize()
+        d = d[rd >= lo]
+    if report_date_to is not None:
+        hi = pd.Timestamp(report_date_to).normalize()
+        d = d[rd <= hi]
+    return d
+
+
+def filter_brands(df: pd.DataFrame, brands: list[str] | None) -> pd.DataFrame:
+    if not brands:
+        return df
+    return df[df["brand"].isin(brands)]
+
+
+def filter_customers(df: pd.DataFrame, customers: list[str] | None) -> pd.DataFrame:
+    if not customers:
+        return df
+    return df[df["customer"].isin(customers)]
+
+
+def sort_and_margin_pivot(p: pd.DataFrame, *, margins_name: str = MARGINS_NAME) -> pd.DataFrame:
+    """
+    純資料 pivot（無 pandas margins）：列、欄依合計由高到低排序，再補列合計欄與欄合計列。
+    """
+    if p is None:
+        return pd.DataFrame()
+    if len(p) == 0 or len(p.columns) == 0:
+        return p
+    core = p.fillna(0)
+    row_totals = core.sum(axis=1)
+    col_totals = core.sum(axis=0)
+    row_idx = row_totals.sort_values(ascending=False).index
+    col_idx = col_totals.sort_values(ascending=False).index
+    core = core.reindex(index=row_idx).reindex(columns=col_idx)
+    out = core.copy()
+    out[margins_name] = core.sum(axis=1)
+    nlv = core.index.nlevels
+    if nlv == 0:
+        return out
+    bottom_tuple = (margins_name,) if nlv == 1 else tuple("" for _ in range(nlv - 1)) + (margins_name,)
+    bot: dict = {c: float(core[c].sum()) for c in core.columns}
+    bot[margins_name] = float(out[margins_name].sum())
+    bottom_df = pd.DataFrame(
+        [bot],
+        index=pd.MultiIndex.from_tuples([bottom_tuple], names=core.index.names),
+    )
+    return pd.concat([out, bottom_df])
+
+
 def period_label(row: pd.Series) -> str:
     s = row["Start_date"]
     e = row["report_date"]
@@ -211,7 +281,7 @@ def period_label(row: pd.Series) -> str:
 
 
 def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """列: 週區間 + brand；欄: customer；值: qty；含列／欄／總合計。"""
+    """列: 週區間 + brand；欄: customer；值: qty 加總；列／欄合計；列欄依合計由高到低。"""
     if len(df) == 0:
         return pd.DataFrame()
     d = df.copy()
@@ -223,108 +293,45 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         values="qty",
         aggfunc="sum",
         fill_value=0,
-        margins=True,
-        margins_name=MARGINS_NAME,
     )
     p.index.names = ["週區間", "品牌"]
-    return p
+    return sort_and_margin_pivot(p)
 
 
-def _filter_df_nonzero_pivot_rows(
-    df: pd.DataFrame,
-    *,
-    index_cols: list[str],
-    column_cols: list[str],
-) -> pd.DataFrame:
-    """只保留 pivot 後列加總 ≠ 0 的 index（全為 0 的品項列隱藏）。"""
+def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """列: brand, EAN, Name；欄: customer（跨 store 加總）；值: qty；列／欄合計；由高到低。"""
     if len(df) == 0:
-        return df
-    pt = pd.pivot_table(
+        return pd.DataFrame()
+    p = pd.pivot_table(
         df,
-        index=index_cols,
-        columns=column_cols,
+        index=["brand", "EAN", "Name"],
+        columns="customer",
         values="qty",
         aggfunc="sum",
         fill_value=0,
     )
-    if len(pt) == 0:
-        return df.iloc[0:0]
-    nz = pt.sum(axis=1) != 0
-    if not nz.any():
-        return df.iloc[0:0]
-    key_df = pt.index[nz].to_frame(index=False)
-    return df.merge(key_df, on=index_cols, how="inner")
+    return sort_and_margin_pivot(p)
 
 
-def report2_pivot(df: pd.DataFrame, *, hide_zero_rows: bool = True) -> pd.DataFrame:
-    """列: brand, EAN, Name；欄: customer + store；值: qty。預設隱藏全 0 品項列；含合計。"""
+def report3_pivot(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    列: brand, EAN, Name；值: qty。
+    僅一個 customer 時欄為 store；多 customer 時欄為 customer + store（避免店名重複）。
+    列／欄合計；由高到低。
+    """
     if len(df) == 0:
         return pd.DataFrame()
-    prep = (
-        _filter_df_nonzero_pivot_rows(
-            df,
-            index_cols=["brand", "EAN", "Name"],
-            column_cols=["customer", "store"],
-        )
-        if hide_zero_rows
-        else df
-    )
-    if len(prep) == 0:
-        return pd.DataFrame()
-    return pd.pivot_table(
-        prep,
+    multi_cust = df["customer"].nunique() > 1
+    cols: str | list[str] = ["customer", "store"] if multi_cust else "store"
+    p = pd.pivot_table(
+        df,
         index=["brand", "EAN", "Name"],
-        columns=["customer", "store"],
+        columns=cols,
         values="qty",
         aggfunc="sum",
         fill_value=0,
-        margins=True,
-        margins_name=MARGINS_NAME,
     )
-
-
-def report2_pivot_by_customer(df: pd.DataFrame, *, hide_zero_rows: bool = True) -> pd.DataFrame:
-    """單一 customer 切片：列 brand/EAN/Name；欄 store。隱藏全 0 列；含合計。"""
-    if len(df) == 0:
-        return pd.DataFrame()
-    prep = (
-        _filter_df_nonzero_pivot_rows(
-            df,
-            index_cols=["brand", "EAN", "Name"],
-            column_cols=["store"],
-        )
-        if hide_zero_rows
-        else df
-    )
-    if len(prep) == 0:
-        return pd.DataFrame()
-    return pd.pivot_table(
-        prep,
-        index=["brand", "EAN", "Name"],
-        columns="store",
-        values="qty",
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name=MARGINS_NAME,
-    )
-
-
-def report3_pivot(df: pd.DataFrame, brands: list[str] | None) -> pd.DataFrame:
-    """Brand 篩選後：列 EAN/Name；欄 customer（跨 store 加總）；含合計。"""
-    d = df if not brands else df[df["brand"].isin(brands)]
-    if len(d) == 0:
-        return pd.DataFrame()
-    return pd.pivot_table(
-        d,
-        index=["EAN", "Name"],
-        columns=["customer"],
-        values="qty",
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name=MARGINS_NAME,
-    )
+    return sort_and_margin_pivot(p)
 
 
 def filter_by_report_date(
