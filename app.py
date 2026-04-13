@@ -147,10 +147,23 @@ with tab_verify:
                         key="verify_sales_override",
                     )
 
-                # 銷貨來源：預設吃 sales_state（以 report_date 視為銷售日；用來挑週別）
-                sales_day = st.date_input("銷售日（= report_date，用來抓該週銷貨）", key="verify_sales_day")
-                wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
-                st.caption(f"銷貨週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}")
+                # 銷貨來源：預設吃 sales_state（以 report_date 視為銷售日；用來挑查核區間）
+                dr1, dr2 = st.columns(2)
+                with dr1:
+                    sales_from = st.date_input(
+                        "銷售日起（= report_date）",
+                        key="verify_sales_from",
+                    )
+                with dr2:
+                    sales_to = st.date_input(
+                        "銷售日迄（= report_date）",
+                        key="verify_sales_to",
+                    )
+                rd_from = pd.Timestamp(sales_from)
+                rd_to = pd.Timestamp(sales_to)
+                if rd_from > rd_to:
+                    rd_from, rd_to = rd_to, rd_from
+                st.caption(f"銷貨區間：{rd_from:%Y-%m-%d}~{rd_to:%Y-%m-%d}")
 
                 df_in = pd.read_excel(f_in) if f_in else None
                 df_ret = pd.read_excel(f_ret) if f_ret else None
@@ -160,7 +173,11 @@ with tab_verify:
                 else:
                     sdf = st.session_state.get("sales_df")
                     df_sales_lines = (
-                        vf.sales_df_to_verify_lines(sdf, week_start=wk_s, week_end=wk_e)
+                        vf.sales_df_to_verify_lines(
+                            sdf,
+                            report_date_from=rd_from,
+                            report_date_to=rd_to,
+                        )
                         if isinstance(sdf, pd.DataFrame) and len(sdf)
                         else None
                     )

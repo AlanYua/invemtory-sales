@@ -82,10 +82,14 @@ def sales_df_to_verify_lines(
     *,
     week_start: pd.Timestamp | None = None,
     week_end: pd.Timestamp | None = None,
+    report_date_from: pd.Timestamp | None = None,
+    report_date_to: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """
     從銷售統計入庫資料（sales_reports.load_sales 後的 sales_df）萃取成查核用欄位。
-    若提供 week_start/week_end，僅取該週（Start_date==week_start 且 report_date==week_end）。
+    篩選規則：
+      - 若提供 week_start/week_end：僅取該週（Start_date==week_start 且 report_date==week_end）。
+      - 若提供 report_date_from/to：以 report_date 視為銷售日，取區間（含起訖日）。
     """
     if sales_df is None or len(sales_df) == 0:
         return pd.DataFrame(columns=VERIFY_COLS)
@@ -94,10 +98,25 @@ def sales_df_to_verify_lines(
     miss = sorted(list(need - set(d.columns)))
     if miss:
         raise ValueError(f"sales_df 缺少欄位: {miss}")
+    sd = pd.to_datetime(d.get("Start_date"), errors="coerce").dt.normalize()
+    rd = pd.to_datetime(d.get("report_date"), errors="coerce").dt.normalize()
+
+    # 舊介面：指定某一週（Start_date/ report_date 成對）
     if week_start is not None:
-        d = d[pd.to_datetime(d["Start_date"], errors="coerce").dt.normalize() == pd.Timestamp(week_start).normalize()]
+        d = d[sd == pd.Timestamp(week_start).normalize()]
+        rd = rd.loc[d.index]
     if week_end is not None:
-        d = d[pd.to_datetime(d["report_date"], errors="coerce").dt.normalize() == pd.Timestamp(week_end).normalize()]
+        d = d[rd == pd.Timestamp(week_end).normalize()]
+        sd = sd.loc[d.index]
+        rd = rd.loc[d.index]
+
+    # 新介面：以 report_date 當銷售日做區間查詢
+    if report_date_from is not None:
+        d = d[rd >= pd.Timestamp(report_date_from).normalize()]
+        sd = sd.loc[d.index]
+        rd = rd.loc[d.index]
+    if report_date_to is not None:
+        d = d[rd <= pd.Timestamp(report_date_to).normalize()]
     out = d[["customer", "EAN", "Name", "store", "qty"]].copy()
     out["qty"] = _coerce_qty(out["qty"])
     for c in ["customer", "EAN", "Name", "store"]:
