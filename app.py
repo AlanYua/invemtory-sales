@@ -173,10 +173,25 @@ with tab_verify:
                 month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
                 rd_from, rd_to = month_start, month_end
 
+                # Streamlit：同一個 key 的 widget 會吃 session_state 舊值，value= 不會覆蓋。
+                # 所以月份變更時要手動 reset，避免日期一直卡在先前（常見是今天）。
+                prev_month_sel = st.session_state.get("_verify_prev_month_sel")
+                if prev_month_sel != month_sel:
+                    st.session_state["verify_sales_day"] = month_start.date()
+                    st.session_state["_verify_prev_month_sel"] = month_sel
+                else:
+                    cur_day = st.session_state.get("verify_sales_day")
+                    if cur_day:
+                        _d = pd.Timestamp(cur_day).normalize()
+                        if _d < month_start or _d > month_end:
+                            st.session_state["verify_sales_day"] = month_start.date()
+
                 with c2:
                     sales_day = st.date_input(
                         "銷售日（看屬於哪週）",
-                        value=month_start.to_pydatetime(),
+                        value=month_start.date(),
+                        min_value=month_start.date(),
+                        max_value=month_end.date(),
                         key="verify_sales_day",
                     )
                 wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
