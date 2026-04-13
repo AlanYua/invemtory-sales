@@ -5,32 +5,14 @@ import pandas as pd
 
 
 VERIFY_COLS = ["customer", "EAN", "Name", "store", "qty"]
-VERIFY_SIMPLE_COLS = ["EAN", "Name", "kind", "qty"]
 
-# 新查驗上傳欄位（統一格式）
-UPLOAD_SIMPLE_ALIASES: dict[str, list[str]] = {
-    "EAN": ["EAN", "ean", "條碼", "條碼(EAN)", "商品條碼"],
-    "Name": ["品名", "Name", "name", "商品名稱"],
-    "kind": ["類型", "Type", "type", "項目", "分類"],
-    "qty": ["數量", "QTY", "qty", "Qty", "數量(件)"],
-    # 可選：若檔案有門市/客戶，可用來補值（沒有就用選到的客戶）
-    "store": ["門市", "店點", "store", "Store"],
-    "customer": ["客戶", "Customer", "customer"],
-}
+# 新版查驗（統一上傳欄位）
+VERIFY_V2_COLS = ["EAN", "品名", "類型", "數量"]
+VERIFY_V2_TYPES = ["進貨", "退貨", "庫存"]
 
-KIND_MAP: dict[str, str] = {
-    "進貨": "進貨",
-    "入庫": "進貨",
-    "purchase": "進貨",
-    "p": "進貨",
-    "退貨": "退貨",
-    "退回": "退貨",
-    "return": "退貨",
-    "r": "退貨",
-    "庫存": "庫存",
-    "stock": "庫存",
-    "s": "庫存",
-}
+
+def _norm_str(s: object) -> str:
+    return str(s).strip()
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -41,6 +23,169 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _coerce_qty(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
+
+
+def _pick_col(d: pd.DataFrame, want: list[str], alts: list[str]) -> str | None:
+    cols = {str(c).strip(): c for c in d.columns}
+    for w in want:
+        if w in cols:
+            return cols[w]
+    for a in alts:
+        if a in cols:
+            return cols[a]
+    return None
+
+
+def load_verify_v2(df: pd.DataFrame, *, forced_type: str | None = None) -> pd.DataFrame:
+    """
+    新版查驗上傳格式：
+      - EAN / 品名 / 類型 / 數量
+    允許常見欄名變體；forced_type 會覆蓋類型欄（用於分檔上傳）。
+    """
+    d = _normalize_columns(df)
+    c_ean = _pick_col(d, ["EAN"], ["ean", "條碼", "條碼號", "商品條碼"])
+    c_name = _pick_col(d, ["品名"], ["Name", "商品", "品項", "商品名稱"])
+    c_type = _pick_col(d, ["類型"], ["type", "Type", "種類", "類別", "單別"])
+    c_qty = _pick_col(d, ["數量"], ["qty", "QTY", "數量(含)", "數量（含）", "數"])
+
+    miss: list[str] = []
+    if c_ean is None:
+        miss.append("EAN")
+    if c_name is None:
+        miss.append("品名")
+    if c_qty is None:
+        miss.append("數量")
+    if c_type is None and not forced_type:
+        miss.append("類型")
+    if miss:
+        raise ValueError(f"缺少欄位: {miss}；目前欄位: {list(d.columns)}")
+
+    out = pd.DataFrame(
+        {
+            "EAN": d[c_ean].astype(str).str.strip(),  # type: ignore[index]
+            "品名": d[c_name].astype(str).str.strip(),  # type: ignore[index]
+            "類型": (forced_type if forced_type else d[c_type].astype(str)).astype(str).str.strip(),  # type: ignore[index]
+            "數量": _coerce_qty(d[c_qty]),  # type: ignore[index]
+        }
+    )
+    out = out[(out["EAN"] != "") & (out["品名"] != "")]
+    return out
+
+
+def _normalize_verify_type(v: object) -> str:
+    s = _norm_str(v)
+    if not s:
+        return s
+    s2 = s.replace(" ", "")
+    if "進" in s2:
+        return "進貨"
+    if "退" in s2:
+        return "退貨"
+    if "庫" in s2 or "存" in s2:
+        return "庫存"
+    return s
+
+
+def aggregate_verify_v2(df: pd.DataFrame) -> pd.DataFrame:
+    d = _normalize_columns(df)
+    missing = [c for c in VERIFY_V2_COLS if c not in d.columns]
+    if missing:
+        raise ValueError(f"缺少欄位: {missing}；目前欄位: {list(d.columns)}")
+    x = d[VERIFY_V2_COLS].copy()
+    x["EAN"] = x["EAN"].astype(str).str.strip()
+    x["品名"] = x["品名"].astype(str).str.strip()
+    x["類型"] = x["類型"].map(_normalize_verify_type)
+    x["數量"] = _coerce_qty(x["數量"])
+    x = x[x["類型"].isin(VERIFY_V2_TYPES)]
+    g = x.groupby(["EAN", "品名", "類型"], as_index=False)["數量"].sum()
+    return g
+
+
+def sales_cumulative_by_ean(
+    sales_df: pd.DataFrame,
+    *,
+    customer: str,
+    report_date_from: pd.Timestamp,
+    report_date_to: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    取「當月客戶累計銷售」：依 customer + report_date 區間篩選後，按 EAN 加總 qty。
+    回傳欄位：EAN, sales_qty
+    """
+    if sales_df is None or len(sales_df) == 0:
+        return pd.DataFrame(columns=["EAN", "sales_qty"])
+    d = sales_df.copy()
+    need = {"customer", "EAN", "qty", "report_date"}
+    miss = sorted(list(need - set(d.columns)))
+    if miss:
+        raise ValueError(f"sales_df 缺少欄位: {miss}")
+    rd = pd.to_datetime(d["report_date"], errors="coerce").dt.normalize()
+    m = (d["customer"].astype(str).str.strip() == str(customer).strip()) & (
+        rd >= pd.Timestamp(report_date_from).normalize()
+    ) & (rd <= pd.Timestamp(report_date_to).normalize())
+    x = d.loc[m, ["EAN", "qty"]].copy()
+    if len(x) == 0:
+        return pd.DataFrame(columns=["EAN", "sales_qty"])
+    x["EAN"] = x["EAN"].astype(str).str.strip()
+    x["qty"] = _coerce_qty(x["qty"])
+    g = x.groupby("EAN", as_index=False)["qty"].sum().rename(columns={"qty": "sales_qty"})
+    return g
+
+
+def compute_verify_v2_report(
+    *,
+    system_df: pd.DataFrame,
+    customer_df: pd.DataFrame,
+    sales_df: pd.DataFrame | None,
+    customer: str,
+    report_date_from: pd.Timestamp,
+    report_date_to: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    報表顯示（值=QTY）：
+      列：EAN/品名
+      欄：凌越(進/退/庫), 客戶(進/退/庫), 差異(進/退/庫), 差異-當月累計銷售(進/退/庫)
+    差異 = 凌越 - 客戶
+    差異-當月累計銷售 = 差異 - sales_qty（月內該客戶 EAN 加總）
+    """
+    s = aggregate_verify_v2(system_df).rename(columns={"數量": "qty_system"})
+    c = aggregate_verify_v2(customer_df).rename(columns={"數量": "qty_customer"})
+    key = ["EAN", "品名", "類型"]
+    m = s.merge(c, on=key, how="outer")
+    m["qty_system"] = _coerce_qty(m.get("qty_system"))
+    m["qty_customer"] = _coerce_qty(m.get("qty_customer"))
+    m["qty_diff"] = m["qty_system"] - m["qty_customer"]
+
+    sales_g = (
+        sales_cumulative_by_ean(
+            sales_df if sales_df is not None else pd.DataFrame(),
+            customer=customer,
+            report_date_from=report_date_from,
+            report_date_to=report_date_to,
+        )
+        if sales_df is not None
+        else pd.DataFrame(columns=["EAN", "sales_qty"])
+    )
+    m = m.merge(sales_g, on=["EAN"], how="left")
+    m["sales_qty"] = _coerce_qty(m.get("sales_qty"))
+    m["qty_diff_minus_sales"] = m["qty_diff"] - m["sales_qty"]
+
+    out = m.pivot_table(
+        index=["EAN", "品名"],
+        columns="類型",
+        values=["qty_system", "qty_customer", "qty_diff", "qty_diff_minus_sales"],
+        aggfunc="sum",
+        fill_value=0,
+    )
+    rename0 = {
+        "qty_system": "凌越",
+        "qty_customer": "客戶",
+        "qty_diff": "差異",
+        "qty_diff_minus_sales": "差異-當月累計銷售",
+    }
+    out.columns = [f"{rename0.get(a, str(a))}({b})" for a, b in out.columns.to_list()]
+    out = out.reset_index()
+    return out
 
 
 def aggregate_lines(
@@ -101,181 +246,6 @@ def _as_verify_lines(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"缺少欄位: {missing}；目前欄位: {list(d.columns)}")
     return d[VERIFY_COLS].copy()
-
-
-def _pick_col(d: pd.DataFrame, logical: str) -> str | None:
-    cands = UPLOAD_SIMPLE_ALIASES.get(logical, [])
-    cols = {str(c).strip(): c for c in d.columns}
-    for cand in cands:
-        if cand in cols:
-            return cols[cand]
-    return None
-
-
-def normalize_simple_upload(
-    df: pd.DataFrame,
-    *,
-    customer: str,
-) -> pd.DataFrame:
-    """
-    新版查驗上傳檔：欄位統一為 EAN/品名/類型/數量（可選 門市/客戶）。
-    - 沒有門市就以客戶補值（通常只進/退貨需要對門市；沒有就用客戶當門市名）
-    - 類型會正規化成：進貨 / 退貨 / 庫存
-    """
-    d = _normalize_columns(df)
-    c_ean = _pick_col(d, "EAN")
-    c_name = _pick_col(d, "Name")
-    c_kind = _pick_col(d, "kind")
-    c_qty = _pick_col(d, "qty")
-    missing: list[str] = []
-    if not c_ean:
-        missing.append("EAN")
-    if not c_name:
-        missing.append("品名")
-    if not c_kind:
-        missing.append("類型")
-    if not c_qty:
-        missing.append("數量")
-    if missing:
-        raise ValueError(f"缺少欄位: {missing}；目前欄位: {list(d.columns)}")
-
-    out = pd.DataFrame(
-        {
-            "EAN": d[c_ean].astype(str).str.strip(),
-            "Name": d[c_name].astype(str).str.strip(),
-            "kind": d[c_kind].astype(str).str.strip(),
-            "qty": _coerce_qty(d[c_qty]),
-        }
-    )
-    # normalize kind
-    kk = out["kind"].astype(str).str.strip()
-    kk2 = kk.str.lower()
-    out["kind"] = [
-        KIND_MAP.get(v, KIND_MAP.get(v.lower(), v))  # type: ignore[arg-type]
-        for v in kk2.tolist()
-    ]
-    out["kind"] = out["kind"].astype(str).str.strip()
-    # drop empty keys
-    out = out[(out["EAN"] != "") & (out["Name"] != "")].copy()
-    # attach customer/store for compatibility with existing aggregators if needed
-    out["customer"] = str(customer).strip()
-    c_store = _pick_col(d, "store")
-    if c_store:
-        out["store"] = d[c_store].astype(str).str.strip().replace({"": None})
-    else:
-        out["store"] = None
-    out["store"] = out["store"].fillna(out["customer"])
-    return out[["customer", "store", "EAN", "Name", "kind", "qty"]].reset_index(drop=True)
-
-
-def sales_df_to_monthly_sales(
-    sales_df: pd.DataFrame,
-    *,
-    customer: str,
-    report_date_from: pd.Timestamp,
-    report_date_to: pd.Timestamp,
-) -> pd.DataFrame:
-    """從銷售統計入庫資料取出指定客戶、指定月份的當月累計銷售（依 EAN/Name 加總）。"""
-    if sales_df is None or len(sales_df) == 0:
-        return pd.DataFrame(columns=["EAN", "Name", "qty_sales"])
-    d = sales_df.copy()
-    need = {"customer", "EAN", "Name", "qty", "report_date"}
-    miss = sorted(list(need - set(d.columns)))
-    if miss:
-        raise ValueError(f"sales_df 缺少欄位: {miss}")
-    d["customer"] = d["customer"].astype(str).str.strip()
-    d = d[d["customer"] == str(customer).strip()]
-    rd = pd.to_datetime(d["report_date"], errors="coerce").dt.normalize()
-    d = d[rd >= pd.Timestamp(report_date_from).normalize()]
-    rd = rd.loc[d.index]
-    d = d[rd <= pd.Timestamp(report_date_to).normalize()]
-    if len(d) == 0:
-        return pd.DataFrame(columns=["EAN", "Name", "qty_sales"])
-    d["EAN"] = d["EAN"].astype(str).str.strip()
-    d["Name"] = d["Name"].astype(str).str.strip()
-    d["qty"] = _coerce_qty(d["qty"])
-    g = d.groupby(["EAN", "Name"], as_index=False)["qty"].sum()
-    return g.rename(columns={"qty": "qty_sales"})
-
-
-def build_verify_report(
-    *,
-    system_upload: pd.DataFrame,
-    customer_upload: pd.DataFrame,
-    monthly_sales: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    報表顯示（列）EAN/品名
-    （欄）
-      - 當月累計銷售
-      - 系統(進貨/退貨/庫存)
-      - 客戶(進貨/退貨/庫存)
-      - 差異(進貨/退貨/庫存) = 系統 - 客戶
-    """
-    if system_upload is None:
-        system_upload = pd.DataFrame()
-    if customer_upload is None:
-        customer_upload = pd.DataFrame()
-
-    s = system_upload.copy()
-    c = customer_upload.copy()
-    for d in (s, c):
-        if len(d) == 0:
-            continue
-        for col in ["EAN", "Name", "kind"]:
-            d[col] = d[col].astype(str).str.strip()
-        d["qty"] = _coerce_qty(d["qty"])
-
-    kinds = ["進貨", "退貨", "庫存"]
-
-    def _agg(x: pd.DataFrame, prefix: str) -> pd.DataFrame:
-        if x is None or len(x) == 0:
-            base = pd.DataFrame(columns=["EAN", "Name"])
-            for k in kinds:
-                base[f"{prefix}{k}"] = 0.0
-            return base
-        x = x[x["kind"].isin(kinds)].copy()
-        p = pd.pivot_table(
-            x,
-            index=["EAN", "Name"],
-            columns="kind",
-            values="qty",
-            aggfunc="sum",
-            fill_value=0,
-        )
-        for k in kinds:
-            if k not in p.columns:
-                p[k] = 0
-        p = p[kinds].copy()
-        p.columns = [f"{prefix}{k}" for k in p.columns.tolist()]
-        return p.reset_index()
-
-    sys_agg = _agg(s, "系統-")
-    cust_agg = _agg(c, "客戶-")
-
-    ms = monthly_sales.copy() if monthly_sales is not None else pd.DataFrame(columns=["EAN", "Name", "qty_sales"])
-    if len(ms):
-        ms["EAN"] = ms["EAN"].astype(str).str.strip()
-        ms["Name"] = ms["Name"].astype(str).str.strip()
-        ms["qty_sales"] = _coerce_qty(ms["qty_sales"])
-
-    out = sys_agg.merge(cust_agg, on=["EAN", "Name"], how="outer").merge(ms, on=["EAN", "Name"], how="outer")
-    out = out.fillna(0)
-    out = out.rename(columns={"qty_sales": "當月累計銷售"})
-    for k in kinds:
-        out[f"差異-{k}"] = out.get(f"系統-{k}", 0) - out.get(f"客戶-{k}", 0)
-
-    col_order = (
-        ["EAN", "Name", "當月累計銷售"]
-        + [f"系統-{k}" for k in kinds]
-        + [f"客戶-{k}" for k in kinds]
-        + [f"差異-{k}" for k in kinds]
-    )
-    for cc in col_order:
-        if cc not in out.columns:
-            out[cc] = 0
-    out = out[col_order].copy()
-    return out.sort_values(["EAN", "Name"], kind="mergesort").reset_index(drop=True)
 
 
 def sales_df_to_verify_lines(

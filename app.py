@@ -184,108 +184,155 @@ with tab_verify:
         st.session_state.verify_reset_seq = 0
     if st.button("重新查驗（清除查驗上傳/選項）", key="btn_verify_reset"):
         for k in [
-            "verify_customer_sel",
-            "verify_customer_manual",
-            "verify_month_sel",
+            "cust",
+            "sys",
+            "verify_in",
+            "verify_ret",
+            "verify_sales_override",
+            "verify_sales_month_sel",
+            "verify_sales_day",
             "_verify_prev_month_sel",
         ]:
             st.session_state.pop(k, None)
         st.session_state.verify_reset_seq += 1
         st.rerun()
 
-    st.caption(
-        "查驗更新方式：先選客戶（用來撈當月累計銷售），再上傳系統檔與客戶檔。"
-        "上傳欄位統一為：EAN / 品名 / 類型(進貨|退貨|庫存) / 數量。"
-    )
-
+    # 新版查驗：先選客戶（用來撈該客戶當月累計銷售）
     sdf = st.session_state.get("sales_df")
     cust_opts: list[str] = []
-    if isinstance(sdf, pd.DataFrame) and len(sdf) and "customer" in sdf.columns:
-        cust_opts = sorted(sdf["customer"].astype(str).str.strip().replace({"": None}).dropna().unique().tolist())
-    if not cust_opts:
-        cust_opts = []
-    cust_opts2 = ["（手動輸入）", *cust_opts] if cust_opts else ["（手動輸入）"]
-
-    cA, cB, cC = st.columns([2, 2, 3])
-    with cA:
-        cust_sel = st.selectbox("查驗客戶（用來撈銷售）", options=cust_opts2, key="verify_customer_sel")
-    with cB:
-        cust_manual = st.text_input("客戶（手動）", key="verify_customer_manual")
-    customer = cust_manual.strip() if cust_sel == "（手動輸入）" else str(cust_sel).strip()
-
     months: list[str] = []
-    if isinstance(sdf, pd.DataFrame) and len(sdf) and "report_date" in sdf.columns:
-        _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
-        if len(_rd):
-            months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
+    if isinstance(sdf, pd.DataFrame) and len(sdf):
+        if "customer" in sdf.columns:
+            cust_opts = sorted(sdf["customer"].astype(str).str.strip().unique().tolist())
+        if "report_date" in sdf.columns:
+            _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
+            if len(_rd):
+                months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
     if not months:
         months = [pd.Timestamp.today().strftime("%Y/%m")]
 
-    with cC:
+    c0, c1 = st.columns([2, 1])
+    with c0:
+        customer_sel = st.selectbox(
+            "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
+            options=cust_opts if cust_opts else ["（無入庫銷售資料：請先到「銷售統計」上傳）"],
+            key="verify_customer_sel",
+        )
+        if customer_sel.startswith("（無入庫銷售資料"):
+            st.stop()
+    with c1:
         month_sel = st.selectbox(
-            "銷售月份（YYYY/MM）",
+            "查驗月份（YYYY/MM）",
             options=months,
             index=len(months) - 1,
-            key="verify_month_sel",
+            key="verify_v2_month_sel",
         )
 
     month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
     month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+    st.caption(f"當月累計銷售區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}")
 
-    u1, u2 = st.columns(2)
-    with u1:
-        f_sys = st.file_uploader(
-            "上傳系統檔（進貨/退貨/庫存）",
+    st.subheader("上傳檔案（欄位統一：EAN／品名／類型／數量）")
+    s1, s2 = st.columns(2)
+    with s1:
+        st.caption("凌越（系統）")
+        sys_mix = st.file_uploader(
+            "系統檔（可混合進/退/庫，用類型欄判斷）",
             type=["xlsx", "xls"],
-            key=f"verify_sys_{st.session_state.verify_reset_seq}",
+            key=f"verify_sys_mix_{st.session_state.verify_reset_seq}",
         )
-    with u2:
-        f_cust = st.file_uploader(
-            "上傳客戶檔（進貨/退貨/庫存）",
+        sys_in = st.file_uploader(
+            "系統進貨（分檔可不含類型欄）",
             type=["xlsx", "xls"],
-            key=f"verify_cust_{st.session_state.verify_reset_seq}",
+            key=f"verify_sys_in_{st.session_state.verify_reset_seq}",
+        )
+        sys_ret = st.file_uploader(
+            "系統退貨（分檔可不含類型欄）",
+            type=["xlsx", "xls"],
+            key=f"verify_sys_ret_{st.session_state.verify_reset_seq}",
+        )
+        sys_inv = st.file_uploader(
+            "系統庫存（分檔可不含類型欄）",
+            type=["xlsx", "xls"],
+            key=f"verify_sys_inv_{st.session_state.verify_reset_seq}",
+        )
+    with s2:
+        st.caption("客戶")
+        cust_mix = st.file_uploader(
+            "客戶檔（可混合進/退/庫，用類型欄判斷）",
+            type=["xlsx", "xls"],
+            key=f"verify_cust_mix_{st.session_state.verify_reset_seq}",
+        )
+        cust_in = st.file_uploader(
+            "客戶進貨（分檔可不含類型欄）",
+            type=["xlsx", "xls"],
+            key=f"verify_cust_in_{st.session_state.verify_reset_seq}",
+        )
+        cust_ret = st.file_uploader(
+            "客戶退貨（分檔可不含類型欄）",
+            type=["xlsx", "xls"],
+            key=f"verify_cust_ret_{st.session_state.verify_reset_seq}",
+        )
+        cust_inv = st.file_uploader(
+            "客戶庫存（分檔可不含類型欄）",
+            type=["xlsx", "xls"],
+            key=f"verify_cust_inv_{st.session_state.verify_reset_seq}",
         )
 
-    if not customer:
-        st.warning("請先選擇/輸入查驗客戶。")
-    elif not f_sys or not f_cust:
-        st.info("請上傳系統檔與客戶檔後才會產生查驗報表。")
-    else:
-        try:
-            df_sys_raw = pd.read_excel(f_sys)
-            df_cust_raw = pd.read_excel(f_cust)
+    def _read_v2(fu: object | None, forced_type: str | None) -> pd.DataFrame:
+        if fu is None:
+            return pd.DataFrame(columns=vf.VERIFY_V2_COLS)
+        raw = pd.read_excel(fu)
+        return vf.load_verify_v2(raw, forced_type=forced_type)
 
-            sys_norm = vf.normalize_simple_upload(df_sys_raw, customer=customer)
-            cust_norm = vf.normalize_simple_upload(df_cust_raw, customer=customer)
-            monthly_sales = vf.sales_df_to_monthly_sales(
-                sdf,
-                customer=customer,
-                report_date_from=month_start,
-                report_date_to=month_end,
-            ) if isinstance(sdf, pd.DataFrame) and len(sdf) else pd.DataFrame(columns=["EAN", "Name", "qty_sales"])
+    try:
+        sys_parts = [
+            _read_v2(sys_mix, None),
+            _read_v2(sys_in, "進貨"),
+            _read_v2(sys_ret, "退貨"),
+            _read_v2(sys_inv, "庫存"),
+        ]
+        cust_parts = [
+            _read_v2(cust_mix, None),
+            _read_v2(cust_in, "進貨"),
+            _read_v2(cust_ret, "退貨"),
+            _read_v2(cust_inv, "庫存"),
+        ]
+        sys_df_v2 = pd.concat([x for x in sys_parts if len(x)], ignore_index=True) if any(len(x) for x in sys_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
+        cust_df_v2 = pd.concat([x for x in cust_parts if len(x)], ignore_index=True) if any(len(x) for x in cust_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
 
-            rep = vf.build_verify_report(
-                system_upload=sys_norm,
-                customer_upload=cust_norm,
-                monthly_sales=monthly_sales,
-            )
+        if len(sys_df_v2) == 0 or len(cust_df_v2) == 0:
+            st.info("請至少各上傳一份：系統檔與客戶檔（可用『混合檔』或分檔）。")
+            st.stop()
 
-            st.subheader("查驗報表")
-            st.caption(f"月份：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}｜客戶：{customer}")
-            st.dataframe(_style_numbers_pos_red_neg_green(rep), use_container_width=True, hide_index=True)
+        rep = vf.compute_verify_v2_report(
+            system_df=sys_df_v2,
+            customer_df=cust_df_v2,
+            sales_df=sdf if isinstance(sdf, pd.DataFrame) else None,
+            customer=customer_sel,
+            report_date_from=month_start,
+            report_date_to=month_end,
+        )
 
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                rep.to_excel(w, sheet_name="verify", index=False)
-            buf.seek(0)
-            st.download_button(
-                "下載查驗報表 Excel",
-                data=buf.getvalue(),
-                file_name=f"verify_{customer}_{month_sel.replace('/', '')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        except Exception as e:
-            st.error(str(e))
+        st.subheader("查驗報表")
+        st.dataframe(
+            _style_numbers_pos_red_neg_green(rep),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            rep.to_excel(w, sheet_name="verify_v2", index=False)
+        buf.seek(0)
+        st.download_button(
+            "下載查驗報表 Excel",
+            data=buf.getvalue(),
+            file_name="verify_v2.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        st.error(str(e))
 
 with tab_sales:
     if not ps.supabase_configured():
