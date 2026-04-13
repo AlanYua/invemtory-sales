@@ -471,7 +471,7 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
     p.index.names = ["週區間", "品牌"]
     out = _pivot_report1_period_subtotals(p)
 
-    # 追加「整月加總」列：用現有的欄合計數字，但把 index 標成 4/1~4/30 這種期間
+    # 追加「整月加總」區塊：同樣拆品牌，再加一列總計
     try:
         if out is None or len(out) == 0:
             return out
@@ -485,18 +485,36 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         rdc = pd.to_datetime(d["report_date"], errors="coerce").dropna()
         if len(rdc) == 0:
             return out
-        month_start = rdc.min().to_period("M").to_timestamp()
+        # 以本次資料所屬月份為準（通常已先在 UI 依月份篩過）
+        month_start = rdc.max().to_period("M").to_timestamp()
         month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
         month_label = f"{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}"
 
+        sub = REPORT1_PERIOD_SUB
+        # detail：排除每週小計與最底欄合計（只保留明細品牌列）
+        is_detail = (
+            (out.index.get_level_values(1).astype(str) != str(sub))
+            & (out.index.get_level_values(1).astype(str) != str(MARGIN_ROW))
+        )
+        detail = out.loc[is_detail].copy()
+
+        # 各品牌整月加總：對同品牌跨週加總
+        brand_totals = detail.groupby(level=1).sum(numeric_only=True)
+        brand_totals.index = pd.MultiIndex.from_tuples(
+            [(month_label, str(b)) for b in brand_totals.index.tolist()],
+            names=out.index.names,
+        )
+
+        # 整月總計：沿用底部欄合計（只加明細，不含週小計），但換成 month_label +（整月加總）
         bot = out.loc[bottom_key]
-        month_row = pd.DataFrame(
+        month_total_row = pd.DataFrame(
             [bot.to_dict()],
             index=pd.MultiIndex.from_tuples([(month_label, "（整月加總）")], names=out.index.names),
         )
 
+        # 插在原本 bottom 之前；bottom 仍保留（欄合計）
         wo_bottom = out.drop(index=[bottom_key])
-        out = pd.concat([wo_bottom, month_row, out.loc[[bottom_key]]])
+        out = pd.concat([wo_bottom, brand_totals, month_total_row, out.loc[[bottom_key]]])
     except Exception:
         pass
     return out
