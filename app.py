@@ -218,8 +218,9 @@ with tab_verify:
             options=cust_opts if cust_opts else ["（無入庫銷售資料：請先到「銷售統計」上傳）"],
             key="verify_customer_sel",
         )
-        if customer_sel.startswith("（無入庫銷售資料"):
-            st.stop()
+        sales_ready = not customer_sel.startswith("（無入庫銷售資料")
+        if not sales_ready:
+            st.warning("尚無入庫銷售資料：請先到「銷售統計」上傳；銷售統計頁仍可正常使用。")
     with c1:
         month_sel = st.selectbox(
             "查驗月份（YYYY/MM）",
@@ -286,6 +287,9 @@ with tab_verify:
         return vf.load_verify_v2(raw, forced_type=forced_type)
 
     try:
+        if not sales_ready:
+            # 不要 st.stop()，避免整個 app（含銷售統計 tab）被中止渲染
+            raise RuntimeError("請先到「銷售統計」上傳銷售資料後，再進行查驗。")
         sys_parts = [
             _read_v2(sys_mix, None),
             _read_v2(sys_in, "進貨"),
@@ -303,7 +307,7 @@ with tab_verify:
 
         if len(sys_df_v2) == 0 or len(cust_df_v2) == 0:
             st.info("請至少各上傳一份：系統檔與客戶檔（可用『混合檔』或分檔）。")
-            st.stop()
+            raise RuntimeError("查驗檔案不足")
 
         rep = vf.compute_verify_v2_report(
             system_df=sys_df_v2,
