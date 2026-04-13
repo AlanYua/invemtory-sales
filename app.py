@@ -541,36 +541,49 @@ with tab_sales:
 
         with tab_r1:
             # 報表 1：weekly/monthly 不要出現在 customer 欄名旁邊 → 分成兩個表顯示
-            if isinstance(r1, pd.DataFrame) and isinstance(r1.columns, pd.MultiIndex) and r1.columns.nlevels >= 2:
-                kinds = set(map(str, r1.columns.get_level_values(0).unique().tolist()))
-                if {"Weekly", "Monthly"} & kinds:
-                    w = r1.xs("Weekly", axis=1, level=0, drop_level=True) if "Weekly" in kinds else pd.DataFrame()
-                    m = r1.xs("Monthly", axis=1, level=0, drop_level=True) if "Monthly" in kinds else pd.DataFrame()
-                    cw, cm = st.columns(2)
-                    with cw:
-                        st.caption("Weekly")
-                        dw, cw_cfg = _pivot_for_display(w)
-                        st.dataframe(
-                            _style_report1_week_subtotals(dw),
-                            use_container_width=True,
-                            column_config=cw_cfg,
-                            hide_index=True,
-                        )
-                    with cm:
-                        st.caption("Monthly")
-                        dm, cm_cfg = _pivot_for_display(m)
-                        st.dataframe(
-                            _style_report1_week_subtotals(dm),
-                            use_container_width=True,
-                            column_config=cm_cfg,
-                            hide_index=True,
-                        )
-                else:
-                    d1, c1 = _pivot_for_display(r1)
+            def _split_r1(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+                if df is None or len(df) == 0:
+                    return None
+                if not isinstance(df, pd.DataFrame):
+                    return None
+                cols = list(df.columns)
+                kind_cols = [c for c in cols if isinstance(c, tuple) and len(c) >= 2 and str(c[0]) in {"Weekly", "Monthly"}]
+                if not kind_cols:
+                    return None
+
+                def _pick(kind: str) -> pd.DataFrame:
+                    sub_cols = [c for c in kind_cols if str(c[0]) == kind]
+                    if not sub_cols:
+                        return pd.DataFrame(index=df.index)
+                    out = df[sub_cols].copy()
+                    # 欄名只留 customer（避免顯示 Weekly/Monthly）
+                    out.columns = [c[1] for c in sub_cols]
+                    # 各自重算列合計（原本的 列合計 是跨 Weekly+Monthly 一起加，會誤導）
+                    out[getattr(sr, "MARGIN_COL", "列合計")] = out.sum(axis=1, numeric_only=True)
+                    return out
+
+                return _pick("Weekly"), _pick("Monthly")
+
+            split = _split_r1(r1) if isinstance(r1, pd.DataFrame) else None
+            if split is not None:
+                w, m = split
+                cw, cm = st.columns(2)
+                with cw:
+                    st.caption("Weekly")
+                    dw, cw_cfg = _pivot_for_display(w)
                     st.dataframe(
-                        _style_report1_week_subtotals(d1),
+                        _style_report1_week_subtotals(dw),
                         use_container_width=True,
-                        column_config=c1,
+                        column_config=cw_cfg,
+                        hide_index=True,
+                    )
+                with cm:
+                    st.caption("Monthly")
+                    dm, cm_cfg = _pivot_for_display(m)
+                    st.dataframe(
+                        _style_report1_week_subtotals(dm),
+                        use_container_width=True,
+                        column_config=cm_cfg,
                         hide_index=True,
                     )
             else:
