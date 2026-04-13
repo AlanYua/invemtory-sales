@@ -4,13 +4,21 @@ from __future__ import annotations
 import base64
 import json
 import pickle
+import sys
 import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+# 強制優先載入本專案同層模組，避免誤載 site-packages 的同名套件
+_BASE_DIR = Path(__file__).resolve().parent
+_base_dir_str = str(_BASE_DIR)
+if _base_dir_str not in sys.path:
+    sys.path.insert(0, _base_dir_str)
 
 import sales_reports as sr
 

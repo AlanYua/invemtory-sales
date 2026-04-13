@@ -3,9 +3,17 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+# 強制優先載入本專案同層模組，避免誤載 site-packages 的同名套件
+_BASE_DIR = Path(__file__).resolve().parent
+_base_dir_str = str(_BASE_DIR)
+if _base_dir_str not in sys.path:
+    sys.path.insert(0, _base_dir_str)
 
 import persist_sales as ps
 import sales_reports as sr
@@ -139,8 +147,8 @@ with tab_verify:
                         key="verify_sales_override",
                     )
 
-                # 銷貨來源：預設吃 sales_state（可依銷售日挑週別）
-                sales_day = st.date_input("銷售日（用來抓該週銷貨）", key="verify_sales_day")
+                # 銷貨來源：預設吃 sales_state（以 report_date 視為銷售日；用來挑週別）
+                sales_day = st.date_input("銷售日（= report_date，用來抓該週銷貨）", key="verify_sales_day")
                 wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
                 st.caption(f"銷貨週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}")
 
