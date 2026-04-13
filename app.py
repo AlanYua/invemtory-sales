@@ -405,23 +405,66 @@ with tab_sales:
         st.subheader("報表查詢")
         dv = sr.ensure_start_report_datetimes(df_view)
 
-        # 單一銷售日 → 自動換算週別（週一~週日），用週區間去篩資料
-        rdc = dv["report_date"].dropna() if len(dv) and "report_date" in dv.columns else pd.Series([], dtype="datetime64[ns]")
-        default_day = (rdc.max().date() if len(rdc) else pd.Timestamp.today().date())
-        sales_day = st.date_input("銷售日", value=default_day, key="q_sales_day")
+        # 以 report_date 做「整月」查詢；另外提供單一銷售日僅用於顯示週別（不影響查詢範圍）
+        rdc = (
+            dv["report_date"].dropna()
+            if len(dv) and "report_date" in dv.columns
+            else pd.Series([], dtype="datetime64[ns]")
+        )
+        months: list[str] = []
+        if len(rdc):
+            months = sorted(pd.to_datetime(rdc, errors="coerce").dropna().dt.strftime("%Y/%m").unique().tolist())
+        if not months:
+            months = [pd.Timestamp.today().strftime("%Y/%m")]
+
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            month_sel = st.selectbox(
+                "銷售月份（YYYY/MM）",
+                options=months,
+                index=len(months) - 1,
+                key="q_sales_month_sel",
+            )
+
+        month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
+        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+
+        prev_month_sel = st.session_state.get("_q_prev_month_sel")
+        if prev_month_sel != month_sel:
+            st.session_state["q_sales_day"] = month_start.date()
+            st.session_state["_q_prev_month_sel"] = month_sel
+        else:
+            cur_day = st.session_state.get("q_sales_day")
+            if cur_day:
+                _d = pd.Timestamp(cur_day).normalize()
+                if _d < month_start or _d > month_end:
+                    st.session_state["q_sales_day"] = month_start.date()
+
+        with c2:
+            sales_day = st.date_input(
+                "銷售日（看屬於哪週）",
+                value=month_start.date(),
+                min_value=month_start.date(),
+                max_value=month_end.date(),
+                key="q_sales_day",
+            )
+
         try:
             wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
-            st.caption(f"週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}")
-            df_base = sr.filter_start_report_dates(
-                dv,
-                start_date_from=wk_s,
-                start_date_to=wk_s,
-                report_date_from=wk_e,
-                report_date_to=wk_e,
+        except Exception:
+            wk_s, wk_e = month_start, month_start + pd.Timedelta(days=6)
+
+        with c3:
+            st.caption(
+                f"查詢區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}（整月，以 report_date 篩選）｜"
+                f"所選銷售日週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
             )
-        except Exception as e:
-            st.error(str(e))
-            df_base = dv
+
+        df_base = sr.filter_start_report_dates(
+            dv,
+            report_date_from=month_start,
+            report_date_to=month_end,
+        )
 
         all_brands = sorted(df_view["brand"].unique())
         all_customers = sorted(df_view["customer"].unique())
