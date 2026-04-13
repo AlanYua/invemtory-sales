@@ -128,8 +128,9 @@ def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styl
         styler = base if hasattr(base, "apply") else df.style
         sub = getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）")
         is_sub = df["品牌"].astype(str) == str(sub)
+        is_month_total = df["品牌"].astype(str) == "（整月加總）"
         is_margin = df["品牌"].astype(str) == str(getattr(sr, "MARGIN_ROW", "欄合計"))
-        flag = is_sub | is_margin
+        flag = is_sub | is_month_total | is_margin
 
         def _row_style(row: pd.Series) -> list[str]:
             if not bool(flag.loc[row.name]):
@@ -539,13 +540,47 @@ with tab_sales:
         )
 
         with tab_r1:
-            d1, c1 = _pivot_for_display(r1)
-            st.dataframe(
-                _style_report1_week_subtotals(d1),
-                use_container_width=True,
-                column_config=c1,
-                hide_index=True,
-            )
+            # 報表 1：weekly/monthly 不要出現在 customer 欄名旁邊 → 分成兩個表顯示
+            if isinstance(r1, pd.DataFrame) and isinstance(r1.columns, pd.MultiIndex) and r1.columns.nlevels >= 2:
+                kinds = set(map(str, r1.columns.get_level_values(0).unique().tolist()))
+                if {"Weekly", "Monthly"} & kinds:
+                    w = r1.xs("Weekly", axis=1, level=0, drop_level=True) if "Weekly" in kinds else pd.DataFrame()
+                    m = r1.xs("Monthly", axis=1, level=0, drop_level=True) if "Monthly" in kinds else pd.DataFrame()
+                    cw, cm = st.columns(2)
+                    with cw:
+                        st.caption("Weekly")
+                        dw, cw_cfg = _pivot_for_display(w)
+                        st.dataframe(
+                            _style_report1_week_subtotals(dw),
+                            use_container_width=True,
+                            column_config=cw_cfg,
+                            hide_index=True,
+                        )
+                    with cm:
+                        st.caption("Monthly")
+                        dm, cm_cfg = _pivot_for_display(m)
+                        st.dataframe(
+                            _style_report1_week_subtotals(dm),
+                            use_container_width=True,
+                            column_config=cm_cfg,
+                            hide_index=True,
+                        )
+                else:
+                    d1, c1 = _pivot_for_display(r1)
+                    st.dataframe(
+                        _style_report1_week_subtotals(d1),
+                        use_container_width=True,
+                        column_config=c1,
+                        hide_index=True,
+                    )
+            else:
+                d1, c1 = _pivot_for_display(r1)
+                st.dataframe(
+                    _style_report1_week_subtotals(d1),
+                    use_container_width=True,
+                    column_config=c1,
+                    hide_index=True,
+                )
 
         with tab_r2:
             d2, c2 = _pivot_for_display(r2)

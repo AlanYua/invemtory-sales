@@ -469,7 +469,37 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         fill_value=0,
     )
     p.index.names = ["週區間", "品牌"]
-    return _pivot_report1_period_subtotals(p)
+    out = _pivot_report1_period_subtotals(p)
+
+    # 追加「整月加總」列：用現有的欄合計數字，但把 index 標成 4/1~4/30 這種期間
+    try:
+        if out is None or len(out) == 0:
+            return out
+        nlv = out.index.nlevels
+        if nlv != 2:
+            return out
+        bottom_key = ("", MARGIN_ROW)
+        if bottom_key not in out.index:
+            return out
+
+        rdc = pd.to_datetime(d["report_date"], errors="coerce").dropna()
+        if len(rdc) == 0:
+            return out
+        month_start = rdc.min().to_period("M").to_timestamp()
+        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+        month_label = f"{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}"
+
+        bot = out.loc[bottom_key]
+        month_row = pd.DataFrame(
+            [bot.to_dict()],
+            index=pd.MultiIndex.from_tuples([(month_label, "（整月加總）")], names=out.index.names),
+        )
+
+        wo_bottom = out.drop(index=[bottom_key])
+        out = pd.concat([wo_bottom, month_row, out.loc[[bottom_key]]])
+    except Exception:
+        pass
+    return out
 
 
 def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
