@@ -184,157 +184,104 @@ with tab_verify:
         st.session_state.verify_reset_seq = 0
     if st.button("重新查驗（清除查驗上傳/選項）", key="btn_verify_reset"):
         for k in [
-            "cust",
-            "sys",
-            "verify_in",
-            "verify_ret",
-            "verify_sales_override",
-            "verify_sales_month_sel",
-            "verify_sales_day",
+            "verify_customer_sel",
+            "verify_customer_manual",
+            "verify_month_sel",
             "_verify_prev_month_sel",
         ]:
             st.session_state.pop(k, None)
         st.session_state.verify_reset_seq += 1
         st.rerun()
 
-    key_mode = st.radio(
-        "對齊鍵",
-        options=["full", "ean"],
-        format_func=lambda x: "完整" if x == "full" else "EAN",
-        horizontal=True,
+    st.caption(
+        "查驗更新方式：先選客戶（用來撈當月累計銷售），再上傳系統檔與客戶檔。"
+        "上傳欄位統一為：EAN / 品名 / 類型(進貨|退貨|庫存) / 數量。"
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        f_cust = st.file_uploader(
-            "客戶報表", type=["xlsx", "xls"], key=f"cust_{st.session_state.verify_reset_seq}"
+
+    sdf = st.session_state.get("sales_df")
+    cust_opts: list[str] = []
+    if isinstance(sdf, pd.DataFrame) and len(sdf) and "customer" in sdf.columns:
+        cust_opts = sorted(sdf["customer"].astype(str).str.strip().replace({"": None}).dropna().unique().tolist())
+    if not cust_opts:
+        cust_opts = []
+    cust_opts2 = ["（手動輸入）", *cust_opts] if cust_opts else ["（手動輸入）"]
+
+    cA, cB, cC = st.columns([2, 2, 3])
+    with cA:
+        cust_sel = st.selectbox("查驗客戶（用來撈銷售）", options=cust_opts2, key="verify_customer_sel")
+    with cB:
+        cust_manual = st.text_input("客戶（手動）", key="verify_customer_manual")
+    customer = cust_manual.strip() if cust_sel == "（手動輸入）" else str(cust_sel).strip()
+
+    months: list[str] = []
+    if isinstance(sdf, pd.DataFrame) and len(sdf) and "report_date" in sdf.columns:
+        _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
+        if len(_rd):
+            months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
+    if not months:
+        months = [pd.Timestamp.today().strftime("%Y/%m")]
+
+    with cC:
+        month_sel = st.selectbox(
+            "銷售月份（YYYY/MM）",
+            options=months,
+            index=len(months) - 1,
+            key="verify_month_sel",
         )
-    with c2:
+
+    month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
+    month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+
+    u1, u2 = st.columns(2)
+    with u1:
         f_sys = st.file_uploader(
-            "系統報表", type=["xlsx", "xls"], key=f"sys_{st.session_state.verify_reset_seq}"
+            "上傳系統檔（進貨/退貨/庫存）",
+            type=["xlsx", "xls"],
+            key=f"verify_sys_{st.session_state.verify_reset_seq}",
+        )
+    with u2:
+        f_cust = st.file_uploader(
+            "上傳客戶檔（進貨/退貨/庫存）",
+            type=["xlsx", "xls"],
+            key=f"verify_cust_{st.session_state.verify_reset_seq}",
         )
 
-    if f_cust and f_sys:
+    if not customer:
+        st.warning("請先選擇/輸入查驗客戶。")
+    elif not f_sys or not f_cust:
+        st.info("請上傳系統檔與客戶檔後才會產生查驗報表。")
+    else:
         try:
-            df_c = pd.read_excel(f_cust)
-            df_s = pd.read_excel(f_sys)
+            df_sys_raw = pd.read_excel(f_sys)
+            df_cust_raw = pd.read_excel(f_cust)
 
-            with st.expander("加總查核（系統-銷售-退貨+進貨＝客戶）", expanded=True):
-                cc1, cc2, cc3 = st.columns(3)
-                with cc1:
-                    f_in = st.file_uploader(
-                        "進貨（查核用）",
-                        type=["xlsx", "xls"],
-                        key=f"verify_in_{st.session_state.verify_reset_seq}",
-                    )
-                with cc2:
-                    f_ret = st.file_uploader(
-                        "退貨（查核用）",
-                        type=["xlsx", "xls"],
-                        key=f"verify_ret_{st.session_state.verify_reset_seq}",
-                    )
-                with cc3:
-                    f_sales_override = st.file_uploader(
-                        "銷貨（可選：若不上傳則用『銷售統計』入庫資料）",
-                        type=["xlsx", "xls"],
-                        key=f"verify_sales_override_{st.session_state.verify_reset_seq}",
-                    )
+            sys_norm = vf.normalize_simple_upload(df_sys_raw, customer=customer)
+            cust_norm = vf.normalize_simple_upload(df_cust_raw, customer=customer)
+            monthly_sales = vf.sales_df_to_monthly_sales(
+                sdf,
+                customer=customer,
+                report_date_from=month_start,
+                report_date_to=month_end,
+            ) if isinstance(sdf, pd.DataFrame) and len(sdf) else pd.DataFrame(columns=["EAN", "Name", "qty_sales"])
 
-                # 銷貨來源：預設吃 sales_state（之後日期都視為「銷售日」= report_date）
-                # 查驗預設一次查整個月（以 report_date 篩選）
-                sdf = st.session_state.get("sales_df")
-                months: list[str] = []
-                if isinstance(sdf, pd.DataFrame) and len(sdf) and "report_date" in sdf.columns:
-                    _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
-                    if len(_rd):
-                        months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
+            rep = vf.build_verify_report(
+                system_upload=sys_norm,
+                customer_upload=cust_norm,
+                monthly_sales=monthly_sales,
+            )
 
-                if not months:
-                    cur = pd.Timestamp.today().strftime("%Y/%m")
-                    months = [cur]
+            st.subheader("查驗報表")
+            st.caption(f"月份：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}｜客戶：{customer}")
+            st.dataframe(_style_numbers_pos_red_neg_green(rep), use_container_width=True, hide_index=True)
 
-                c1, c2, c3 = st.columns([1, 1, 2])
-                with c1:
-                    month_sel = st.selectbox(
-                        "銷售月份（YYYY/MM）",
-                        options=months,
-                        index=len(months) - 1,
-                        key="verify_sales_month_sel",
-                    )
-
-                month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
-                month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
-                rd_from, rd_to = month_start, month_end
-
-                # Streamlit：同一個 key 的 widget 會吃 session_state 舊值，value= 不會覆蓋。
-                # 所以月份變更時要手動 reset，避免日期一直卡在先前（常見是今天）。
-                prev_month_sel = st.session_state.get("_verify_prev_month_sel")
-                if prev_month_sel != month_sel:
-                    st.session_state["verify_sales_day"] = month_start.date()
-                    st.session_state["_verify_prev_month_sel"] = month_sel
-                else:
-                    cur_day = st.session_state.get("verify_sales_day")
-                    if cur_day:
-                        _d = pd.Timestamp(cur_day).normalize()
-                        if _d < month_start or _d > month_end:
-                            st.session_state["verify_sales_day"] = month_start.date()
-
-                with c2:
-                    sales_day = st.date_input(
-                        "銷售日（看屬於哪週）",
-                        value=month_start.date(),
-                        min_value=month_start.date(),
-                        max_value=month_end.date(),
-                        key="verify_sales_day",
-                    )
-                wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
-
-                with c3:
-                    st.caption(
-                        f"銷貨查詢：{rd_from:%Y-%m-%d}~{rd_to:%Y-%m-%d}（整月）｜"
-                        f"所選銷售日週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
-                    )
-
-                df_in = pd.read_excel(f_in) if f_in else None
-                df_ret = pd.read_excel(f_ret) if f_ret else None
-
-                if f_sales_override:
-                    df_sales_lines = pd.read_excel(f_sales_override)
-                else:
-                    df_sales_lines = (
-                        vf.sales_df_to_verify_lines(
-                            sdf,
-                            report_date_from=rd_from,
-                            report_date_to=rd_to,
-                        )
-                        if isinstance(sdf, pd.DataFrame) and len(sdf)
-                        else None
-                    )
-                    if df_sales_lines is None:
-                        st.warning("尚無『銷售統計』入庫資料可用（或目前為空）。你也可以改用上傳銷貨檔。")
-
-                recon = vf.compute_reconcile(
-                    customer_df=df_c,
-                    system_df=df_s,
-                    purchase_df=df_in,
-                    return_df=df_ret,
-                    sales_lines_df=df_sales_lines,
-                    key_level=key_mode,
-                )
-
-            st.subheader("差異明細")
-            st.dataframe(recon, use_container_width=True)
-            only_diff = recon[recon["diff_calc_minus_customer"] != 0]
-            st.metric("加總差異≠0 筆數", len(only_diff))
-            st.dataframe(only_diff, use_container_width=True)
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                recon.to_excel(w, sheet_name="all", index=False)
-                only_diff.to_excel(w, sheet_name="nonzero_diff", index=False)
+                rep.to_excel(w, sheet_name="verify", index=False)
             buf.seek(0)
             st.download_button(
-                "下載查核差異 Excel",
+                "下載查驗報表 Excel",
                 data=buf.getvalue(),
-                file_name="verify_reconcile.xlsx",
+                file_name=f"verify_{customer}_{month_sel.replace('/', '')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception as e:
