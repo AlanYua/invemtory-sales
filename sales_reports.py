@@ -375,13 +375,22 @@ def sort_and_margin_pivot(p: pd.DataFrame, *, brand_first: bool = False) -> pd.D
 
 
 def period_label(row: pd.Series) -> str:
-    s = row["Start_date"]
     e = row["report_date"]
+    # monthly（累積）不應顯示成「1號~某日」的週區間；改成「截至日」的標籤
+    if is_monthly_kind(row.get("qty_kind")):
+        return f"{e:%Y-%m-%d}（月累積）"
+    s = row["Start_date"]
     return f"{s:%Y-%m-%d}~{e:%Y-%m-%d}"
 
 
 def _period_start_ts(period_label: object) -> pd.Timestamp:
+    # 兼容：
+    # - weekly: 'YYYY-MM-DD~YYYY-MM-DD'
+    # - monthly: 'YYYY-MM-DD（月累積）'
     s = str(period_label).split("~", 1)[0].strip()
+    # 把括號後綴去掉，避免 to_datetime 失敗
+    if "（" in s:
+        s = s.split("（", 1)[0].strip()
     t = pd.to_datetime(s, errors="coerce")
     return t if pd.notna(t) else pd.Timestamp.min
 
