@@ -88,6 +88,34 @@ def _pivot_for_display(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return out, cfg
 
 
+def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styler | pd.DataFrame":
+    """
+    Streamlit 的 dataframe 有時會把「小計/合計」那列看起來像被淡化。
+    這裡主動把週小計列做成更清楚的視覺樣式（避免「反灰像被 disabled」的觀感）。
+    """
+    if df is None or len(df) == 0:
+        return df
+    if "品牌" not in df.columns:
+        return df
+    try:
+        sub = getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）")
+        is_sub = df["品牌"].astype(str) == str(sub)
+        is_margin = df["品牌"].astype(str) == str(getattr(sr, "MARGIN_ROW", "欄合計"))
+        flag = is_sub | is_margin
+
+        def _row_style(row: pd.Series) -> list[str]:
+            if not bool(flag.loc[row.name]):
+                return [""] * len(row)
+            # 深色系：讓小計「更亮更粗」，避免看起來反灰
+            return ["font-weight: 700; color: #E6E6E6; background-color: rgba(255,255,255,0.06)"] * len(
+                row
+            )
+
+        return df.style.apply(_row_style, axis=1)
+    except Exception:
+        return df
+
+
 st.set_page_config(page_title="庫存查驗 / 銷售統計", layout="wide")
 
 if not st.session_state.get("auth_ok"):
@@ -484,7 +512,12 @@ with tab_sales:
 
         with tab_r1:
             d1, c1 = _pivot_for_display(r1)
-            st.dataframe(d1, use_container_width=True, column_config=c1, hide_index=True)
+            st.dataframe(
+                _style_report1_week_subtotals(d1),
+                use_container_width=True,
+                column_config=c1,
+                hide_index=True,
+            )
 
         with tab_r2:
             d2, c2 = _pivot_for_display(r2)
