@@ -213,14 +213,26 @@ with tab_verify:
 
     c0, c1 = st.columns([2, 1])
     with c0:
-        customer_sel = st.selectbox(
-            "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
-            options=cust_opts if cust_opts else ["（無入庫銷售資料：請先到「銷售統計」上傳）"],
-            key="verify_customer_sel",
+        if cust_opts:
+            customer_sel = st.selectbox(
+                "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
+                options=cust_opts,
+                key="verify_customer_sel",
+            )
+        else:
+            customer_sel = st.text_input(
+                "查驗客戶（sales_df 客戶清單抓不到時手動輸入）",
+                key="verify_customer_sel_text",
+            ).strip()
+
+        # sales_df 若存在且有需要欄位，就用來算「當月累計銷售」；否則查驗仍可做，sales 視為 0
+        sales_ready = (
+            isinstance(sdf, pd.DataFrame)
+            and len(sdf)
+            and all(x in sdf.columns for x in ["customer", "EAN", "qty", "report_date"])
         )
-        sales_ready = not customer_sel.startswith("（無入庫銷售資料")
         if not sales_ready:
-            st.warning("尚無入庫銷售資料：請先到「銷售統計」上傳；銷售統計頁仍可正常使用。")
+            st.info("找不到可用的入庫銷售明細（或缺欄位）。查驗仍可進行，但『當月累計銷售』會以 0 計。")
     with c1:
         month_sel = st.selectbox(
             "查驗月份（YYYY/MM）",
@@ -287,9 +299,6 @@ with tab_verify:
         return vf.load_verify_v2(raw, forced_type=forced_type)
 
     try:
-        if not sales_ready:
-            # 不要 st.stop()，避免整個 app（含銷售統計 tab）被中止渲染
-            raise RuntimeError("請先到「銷售統計」上傳銷售資料後，再進行查驗。")
         sys_parts = [
             _read_v2(sys_mix, None),
             _read_v2(sys_in, "進貨"),
@@ -312,7 +321,7 @@ with tab_verify:
         rep = vf.compute_verify_v2_report(
             system_df=sys_df_v2,
             customer_df=cust_df_v2,
-            sales_df=sdf if isinstance(sdf, pd.DataFrame) else None,
+            sales_df=sdf if sales_ready else None,
             customer=customer_sel,
             report_date_from=month_start,
             report_date_to=month_end,
