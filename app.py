@@ -259,46 +259,16 @@ with tab_verify:
     with s1:
         st.caption("凌越（系統）")
         sys_mix = st.file_uploader(
-            "系統檔（可混合進/退/庫，用類型欄判斷）",
+            "系統檔（混合進/退/庫，用類型欄判斷）",
             type=["xlsx", "xls"],
             key=f"verify_sys_mix_{st.session_state.verify_reset_seq}",
-        )
-        sys_in = st.file_uploader(
-            "系統進貨（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_sys_in_{st.session_state.verify_reset_seq}",
-        )
-        sys_ret = st.file_uploader(
-            "系統退貨（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_sys_ret_{st.session_state.verify_reset_seq}",
-        )
-        sys_inv = st.file_uploader(
-            "系統庫存（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_sys_inv_{st.session_state.verify_reset_seq}",
         )
     with s2:
         st.caption("客戶")
         cust_mix = st.file_uploader(
-            "客戶檔（可混合進/退/庫，用類型欄判斷）",
+            "客戶檔（混合進/退/庫，用類型欄判斷）",
             type=["xlsx", "xls"],
             key=f"verify_cust_mix_{st.session_state.verify_reset_seq}",
-        )
-        cust_in = st.file_uploader(
-            "客戶進貨（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_cust_in_{st.session_state.verify_reset_seq}",
-        )
-        cust_ret = st.file_uploader(
-            "客戶退貨（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_cust_ret_{st.session_state.verify_reset_seq}",
-        )
-        cust_inv = st.file_uploader(
-            "客戶庫存（分檔可不含類型欄）",
-            type=["xlsx", "xls"],
-            key=f"verify_cust_inv_{st.session_state.verify_reset_seq}",
         )
 
     def _read_v2(fu: object | None, forced_type: str | None) -> pd.DataFrame:
@@ -310,15 +280,9 @@ with tab_verify:
     try:
         sys_parts = [
             _read_v2(sys_mix, None),
-            _read_v2(sys_in, "進貨"),
-            _read_v2(sys_ret, "退貨"),
-            _read_v2(sys_inv, "庫存"),
         ]
         cust_parts = [
             _read_v2(cust_mix, None),
-            _read_v2(cust_in, "進貨"),
-            _read_v2(cust_ret, "退貨"),
-            _read_v2(cust_inv, "庫存"),
         ]
         sys_df_v2 = pd.concat([x for x in sys_parts if len(x)], ignore_index=True) if any(len(x) for x in sys_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
         cust_df_v2 = pd.concat([x for x in cust_parts if len(x)], ignore_index=True) if any(len(x) for x in cust_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
