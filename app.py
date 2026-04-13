@@ -213,7 +213,8 @@ with tab_verify:
 
     c0, c1 = st.columns([2, 1])
     with c0:
-        if cust_opts:
+        use_manual_customer = st.checkbox("手動輸入客戶", key="verify_use_manual_customer")
+        if cust_opts and not use_manual_customer:
             customer_sel = st.selectbox(
                 "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
                 options=cust_opts,
@@ -221,7 +222,7 @@ with tab_verify:
             )
         else:
             customer_sel = st.text_input(
-                "查驗客戶（sales_df 客戶清單抓不到時手動輸入）",
+                "查驗客戶（用來撈該客戶當月累計銷售）",
                 key="verify_customer_sel_text",
             ).strip()
 
@@ -231,8 +232,16 @@ with tab_verify:
             and len(sdf)
             and all(x in sdf.columns for x in ["customer", "EAN", "qty", "report_date"])
         )
-        if not sales_ready:
+        sales_ready_for_customer = False
+        if sales_ready and customer_sel:
+            cust_set = set(sdf["customer"].astype(str).str.strip().unique().tolist())  # type: ignore[union-attr]
+            sales_ready_for_customer = customer_sel.strip() in cust_set
+            if not sales_ready_for_customer:
+                st.warning("銷售統計找不到此客戶：『當月累計銷售』將以 0 計。")
+        elif not sales_ready:
             st.info("找不到可用的入庫銷售明細（或缺欄位）。查驗仍可進行，但『當月累計銷售』會以 0 計。")
+        elif not customer_sel:
+            st.warning("請先填寫/選擇客戶（用來帶入當月累計銷售）。")
     with c1:
         month_sel = st.selectbox(
             "查驗月份（YYYY/MM）",
@@ -321,7 +330,7 @@ with tab_verify:
         rep = vf.compute_verify_v2_report(
             system_df=sys_df_v2,
             customer_df=cust_df_v2,
-            sales_df=sdf if sales_ready else None,
+            sales_df=sdf if sales_ready_for_customer else None,
             customer=customer_sel,
             report_date_from=month_start,
             report_date_to=month_end,
