@@ -16,6 +16,18 @@ SALES_COLS = [
     "qty",
 ]
 
+# 上傳檔不再強制需要 Start_date；缺少時會依 report_date + qty_kind 推導。
+UPLOAD_COLS = [
+    "report_date",
+    "qty_kind",
+    "customer",
+    "brand",
+    "EAN",
+    "Name",
+    "store",
+    "qty",
+]
+
 # 累積銷售對齊鍵：同一區間起點 + 品項 + 店點，扣「上次上傳的累積 qty」
 MONTHLY_BASELINE_KEYS = [
     "Start_date",
@@ -44,15 +56,34 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_sales(df: pd.DataFrame) -> pd.DataFrame:
     d = _normalize_columns(df)
-    missing = [c for c in SALES_COLS if c not in d.columns]
+    missing = [c for c in UPLOAD_COLS if c not in d.columns]
     if missing:
         raise ValueError(f"缺少欄位: {missing}；目前欄位: {list(d.columns)}")
-    d = d[SALES_COLS].copy()
-    d["Start_date"] = pd.to_datetime(d["Start_date"], errors="coerce")
+
+    # 先取必需欄位；Start_date 若有帶就先保留，後面會 normalize / 推導補齊
+    keep = (["Start_date"] if "Start_date" in d.columns else []) + UPLOAD_COLS
+    d = d[keep].copy()
+
     d["report_date"] = pd.to_datetime(d["report_date"], errors="coerce")
     d["qty"] = pd.to_numeric(d["qty"], errors="coerce").fillna(0)
     for c in ["qty_kind", "customer", "brand", "EAN", "Name", "store"]:
         d[c] = d[c].astype(str).str.strip()
+
+    # Start_date 缺少就推導：
+    # - weekly（非 monthly）：用 report_date 所屬週的週一
+    # - monthly：用 report_date 所屬月份的 1 號（作為累積對齊鍵的區間起點）
+    if "Start_date" in d.columns:
+        d["Start_date"] = pd.to_datetime(d["Start_date"], errors="coerce")
+    else:
+        d["Start_date"] = pd.NaT
+    is_m = d["qty_kind"].map(is_monthly_kind)
+    rd_norm = d["report_date"].dt.normalize()
+    wk_start = rd_norm - pd.to_timedelta(rd_norm.dt.weekday, unit="D")
+    mo_start = rd_norm.dt.to_period("M").dt.to_timestamp()
+    d.loc[d["Start_date"].isna() & ~is_m, "Start_date"] = wk_start
+    d.loc[d["Start_date"].isna() & is_m, "Start_date"] = mo_start
+
+    d = d[SALES_COLS].copy()
     d = d.dropna(subset=["Start_date", "report_date"])
     return d
 
