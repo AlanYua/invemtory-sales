@@ -249,6 +249,20 @@ def filter_start_report_dates(
     return d.loc[m]
 
 
+def week_range_monday_sunday(sales_day: pd.Timestamp | str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    依「單一銷售日」換算所屬週區間（週一~週日）。
+    例：2026-04-10（五）→ 2026-04-06~2026-04-12
+    """
+    day = pd.to_datetime(sales_day, errors="coerce")
+    if pd.isna(day):
+        raise ValueError("sales_day 無法解析為日期")
+    d = pd.Timestamp(day).normalize()
+    start = d - pd.Timedelta(days=int(d.weekday()))  # Monday=0
+    end = start + pd.Timedelta(days=6)
+    return start, end
+
+
 def filter_by_year_months(df: pd.DataFrame, months: list[str] | None) -> pd.DataFrame:
     """
     依西曆月份篩選。months 為 ['2026/04', ...] 格式；None 或 [] 表示不篩（全部）。

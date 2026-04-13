@@ -125,21 +125,63 @@ with tab_verify:
         try:
             df_c = pd.read_excel(f_cust)
             df_s = pd.read_excel(f_sys)
-            diff = vf.compute_diff(df_c, df_s, key_level=key_mode)
+
+            with st.expander("加總查核（系統-銷售-退貨+進貨＝客戶）", expanded=True):
+                cc1, cc2, cc3 = st.columns(3)
+                with cc1:
+                    f_in = st.file_uploader("進貨（查核用）", type=["xlsx", "xls"], key="verify_in")
+                with cc2:
+                    f_ret = st.file_uploader("退貨（查核用）", type=["xlsx", "xls"], key="verify_ret")
+                with cc3:
+                    f_sales_override = st.file_uploader(
+                        "銷貨（可選：若不上傳則用『銷售統計』入庫資料）",
+                        type=["xlsx", "xls"],
+                        key="verify_sales_override",
+                    )
+
+                # 銷貨來源：預設吃 sales_state（可依銷售日挑週別）
+                sales_day = st.date_input("銷售日（用來抓該週銷貨）", key="verify_sales_day")
+                wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
+                st.caption(f"銷貨週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}")
+
+                df_in = pd.read_excel(f_in) if f_in else None
+                df_ret = pd.read_excel(f_ret) if f_ret else None
+
+                if f_sales_override:
+                    df_sales_lines = pd.read_excel(f_sales_override)
+                else:
+                    sdf = st.session_state.get("sales_df")
+                    df_sales_lines = (
+                        vf.sales_df_to_verify_lines(sdf, week_start=wk_s, week_end=wk_e)
+                        if isinstance(sdf, pd.DataFrame) and len(sdf)
+                        else None
+                    )
+                    if df_sales_lines is None:
+                        st.warning("尚無『銷售統計』入庫資料可用（或目前為空）。你也可以改用上傳銷貨檔。")
+
+                recon = vf.compute_reconcile(
+                    customer_df=df_c,
+                    system_df=df_s,
+                    purchase_df=df_in,
+                    return_df=df_ret,
+                    sales_lines_df=df_sales_lines,
+                    key_level=key_mode,
+                )
+
             st.subheader("差異明細")
-            st.dataframe(diff, use_container_width=True)
-            only_diff = diff[diff["diff_system_minus_customer"] != 0]
-            st.metric("差異≠0 筆數", len(only_diff))
+            st.dataframe(recon, use_container_width=True)
+            only_diff = recon[recon["diff_calc_minus_customer"] != 0]
+            st.metric("加總差異≠0 筆數", len(only_diff))
             st.dataframe(only_diff, use_container_width=True)
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                diff.to_excel(w, sheet_name="all", index=False)
+                recon.to_excel(w, sheet_name="all", index=False)
                 only_diff.to_excel(w, sheet_name="nonzero_diff", index=False)
             buf.seek(0)
             st.download_button(
-                "下載差異 Excel",
+                "下載查核差異 Excel",
                 data=buf.getvalue(),
-                file_name="verify_diff.xlsx",
+                file_name="verify_reconcile.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception as e:
@@ -301,23 +343,23 @@ with tab_sales:
 
         st.subheader("報表查詢")
         dv = sr.ensure_start_report_datetimes(df_view)
-        month_opts: list[str] = []
-        if len(dv):
-            yms: set[str] = set()
-            for _col in ("Start_date", "report_date"):
-                s = dv[_col].dropna()
-                if len(s):
-                    yms.update(s.dt.strftime("%Y/%m").unique().tolist())
-            month_opts = sorted(yms)
-        if month_opts:
-            sel_m = st.multiselect(
-                "月份 YYYY/MM",
-                options=month_opts,
-                default=[],
-                key="q_months",
+
+        # 單一銷售日 → 自動換算週別（週一~週日），用週區間去篩資料
+        rdc = dv["report_date"].dropna() if len(dv) and "report_date" in dv.columns else pd.Series([], dtype="datetime64[ns]")
+        default_day = (rdc.max().date() if len(rdc) else pd.Timestamp.today().date())
+        sales_day = st.date_input("銷售日", value=default_day, key="q_sales_day")
+        try:
+            wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
+            st.caption(f"週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}")
+            df_base = sr.filter_start_report_dates(
+                dv,
+                start_date_from=wk_s,
+                start_date_to=wk_s,
+                report_date_from=wk_e,
+                report_date_to=wk_e,
             )
-            df_base = sr.filter_by_year_months(df_view, sel_m if sel_m else None)
-        else:
+        except Exception as e:
+            st.error(str(e))
             df_base = dv
 
         all_brands = sorted(df_view["brand"].unique())
