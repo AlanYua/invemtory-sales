@@ -147,23 +147,45 @@ with tab_verify:
                         key="verify_sales_override",
                     )
 
-                # 銷貨來源：預設吃 sales_state（以 report_date 視為銷售日；用來挑查核區間）
-                dr1, dr2 = st.columns(2)
-                with dr1:
-                    sales_from = st.date_input(
-                        "銷售日起（= report_date）",
-                        key="verify_sales_from",
+                # 銷貨來源：預設吃 sales_state（之後日期都視為「銷售日」= report_date）
+                # 查驗預設一次查整個月（以 report_date 篩選）
+                sdf = st.session_state.get("sales_df")
+                months: list[str] = []
+                if isinstance(sdf, pd.DataFrame) and len(sdf) and "report_date" in sdf.columns:
+                    _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
+                    if len(_rd):
+                        months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
+
+                if not months:
+                    cur = pd.Timestamp.today().strftime("%Y/%m")
+                    months = [cur]
+
+                c1, c2, c3 = st.columns([1, 1, 2])
+                with c1:
+                    month_sel = st.selectbox(
+                        "銷售月份（YYYY/MM）",
+                        options=months,
+                        index=len(months) - 1,
+                        key="verify_sales_month_sel",
                     )
-                with dr2:
-                    sales_to = st.date_input(
-                        "銷售日迄（= report_date）",
-                        key="verify_sales_to",
+
+                month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
+                month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
+                rd_from, rd_to = month_start, month_end
+
+                with c2:
+                    sales_day = st.date_input(
+                        "銷售日（看屬於哪週）",
+                        value=month_start.to_pydatetime(),
+                        key="verify_sales_day",
                     )
-                rd_from = pd.Timestamp(sales_from)
-                rd_to = pd.Timestamp(sales_to)
-                if rd_from > rd_to:
-                    rd_from, rd_to = rd_to, rd_from
-                st.caption(f"銷貨區間：{rd_from:%Y-%m-%d}~{rd_to:%Y-%m-%d}")
+                wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
+
+                with c3:
+                    st.caption(
+                        f"銷貨查詢：{rd_from:%Y-%m-%d}~{rd_to:%Y-%m-%d}（整月）｜"
+                        f"所選銷售日週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
+                    )
 
                 df_in = pd.read_excel(f_in) if f_in else None
                 df_ret = pd.read_excel(f_ret) if f_ret else None
@@ -171,7 +193,6 @@ with tab_verify:
                 if f_sales_override:
                     df_sales_lines = pd.read_excel(f_sales_override)
                 else:
-                    sdf = st.session_state.get("sales_df")
                     df_sales_lines = (
                         vf.sales_df_to_verify_lines(
                             sdf,
