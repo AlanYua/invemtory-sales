@@ -179,6 +179,24 @@ st.title("庫存查驗 / 銷售統計")
 tab_verify, tab_sales = st.tabs(["1. 查驗", "2. 銷售統計"])
 
 with tab_verify:
+    # 重新查驗：清掉查驗相關 widget/state，允許同檔案重新上傳並重跑
+    if "verify_reset_seq" not in st.session_state:
+        st.session_state.verify_reset_seq = 0
+    if st.button("重新查驗（清除查驗上傳/選項）", key="btn_verify_reset"):
+        for k in [
+            "cust",
+            "sys",
+            "verify_in",
+            "verify_ret",
+            "verify_sales_override",
+            "verify_sales_month_sel",
+            "verify_sales_day",
+            "_verify_prev_month_sel",
+        ]:
+            st.session_state.pop(k, None)
+        st.session_state.verify_reset_seq += 1
+        st.rerun()
+
     key_mode = st.radio(
         "對齊鍵",
         options=["full", "ean"],
@@ -187,9 +205,13 @@ with tab_verify:
     )
     c1, c2 = st.columns(2)
     with c1:
-        f_cust = st.file_uploader("客戶報表", type=["xlsx", "xls"], key="cust")
+        f_cust = st.file_uploader(
+            "客戶報表", type=["xlsx", "xls"], key=f"cust_{st.session_state.verify_reset_seq}"
+        )
     with c2:
-        f_sys = st.file_uploader("系統報表", type=["xlsx", "xls"], key="sys")
+        f_sys = st.file_uploader(
+            "系統報表", type=["xlsx", "xls"], key=f"sys_{st.session_state.verify_reset_seq}"
+        )
 
     if f_cust and f_sys:
         try:
@@ -199,14 +221,22 @@ with tab_verify:
             with st.expander("加總查核（系統-銷售-退貨+進貨＝客戶）", expanded=True):
                 cc1, cc2, cc3 = st.columns(3)
                 with cc1:
-                    f_in = st.file_uploader("進貨（查核用）", type=["xlsx", "xls"], key="verify_in")
+                    f_in = st.file_uploader(
+                        "進貨（查核用）",
+                        type=["xlsx", "xls"],
+                        key=f"verify_in_{st.session_state.verify_reset_seq}",
+                    )
                 with cc2:
-                    f_ret = st.file_uploader("退貨（查核用）", type=["xlsx", "xls"], key="verify_ret")
+                    f_ret = st.file_uploader(
+                        "退貨（查核用）",
+                        type=["xlsx", "xls"],
+                        key=f"verify_ret_{st.session_state.verify_reset_seq}",
+                    )
                 with cc3:
                     f_sales_override = st.file_uploader(
                         "銷貨（可選：若不上傳則用『銷售統計』入庫資料）",
                         type=["xlsx", "xls"],
-                        key="verify_sales_override",
+                        key=f"verify_sales_override_{st.session_state.verify_reset_seq}",
                     )
 
                 # 銷貨來源：預設吃 sales_state（之後日期都視為「銷售日」= report_date）
