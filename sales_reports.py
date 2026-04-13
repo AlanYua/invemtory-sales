@@ -447,11 +447,23 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) == 0:
         return pd.DataFrame()
     d = df.copy()
-    d["_period"] = d.apply(period_label, axis=1)
+    d = ensure_start_report_datetimes(d)
+
+    # 報表 1 一律以 report_date 所屬週（週一~週日）分週區間：
+    # - weekly：自然落在該週
+    # - monthly（累積）：以該筆 report_date 落在哪週就歸到那週（例：12 號→ 04/06~04/12）
+    rd = pd.to_datetime(d["report_date"], errors="coerce")
+    rd_norm = rd.dt.normalize()
+    wk_start = rd_norm - pd.to_timedelta(rd_norm.dt.weekday, unit="D")
+    wk_end = wk_start + pd.Timedelta(days=6)
+    d["_period"] = wk_start.dt.strftime("%Y-%m-%d") + "~" + wk_end.dt.strftime("%Y-%m-%d")
+
+    # weekly / monthly 分欄顯示
+    d["_kind"] = d["qty_kind"].map(lambda x: "Monthly" if is_monthly_kind(x) else "Weekly")
     p = pd.pivot_table(
         d,
         index=["_period", "brand"],
-        columns="customer",
+        columns=["_kind", "customer"],
         values="qty",
         aggfunc="sum",
         fill_value=0,
