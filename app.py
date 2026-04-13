@@ -88,6 +88,32 @@ def _pivot_for_display(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return out, cfg
 
 
+def _style_numbers_pos_red_neg_green(
+    df: pd.DataFrame,
+) -> "pd.io.formats.style.Styler | pd.DataFrame":
+    if df is None or len(df) == 0:
+        return df
+    try:
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if not num_cols:
+            return df
+
+        def _cell(v: object) -> str:
+            try:
+                x = float(v)
+            except Exception:
+                return ""
+            if x > 0:
+                return "color: #ff4d4f;"  # red
+            if x < 0:
+                return "color: #52c41a;"  # green
+            return ""
+
+        return df.style.map(_cell, subset=num_cols)
+    except Exception:
+        return df
+
+
 def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styler | pd.DataFrame":
     """
     Streamlit 的 dataframe 有時會把「小計/合計」那列看起來像被淡化。
@@ -98,6 +124,8 @@ def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styl
     if "品牌" not in df.columns:
         return df
     try:
+        base = _style_numbers_pos_red_neg_green(df)
+        styler = base if hasattr(base, "apply") else df.style
         sub = getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）")
         is_sub = df["品牌"].astype(str) == str(sub)
         is_margin = df["品牌"].astype(str) == str(getattr(sr, "MARGIN_ROW", "欄合計"))
@@ -111,7 +139,7 @@ def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styl
                 row
             )
 
-        return df.style.apply(_row_style, axis=1)
+        return styler.apply(_row_style, axis=1)
     except Exception:
         return df
 
@@ -521,11 +549,21 @@ with tab_sales:
 
         with tab_r2:
             d2, c2 = _pivot_for_display(r2)
-            st.dataframe(d2, use_container_width=True, column_config=c2, hide_index=True)
+            st.dataframe(
+                _style_numbers_pos_red_neg_green(d2),
+                use_container_width=True,
+                column_config=c2,
+                hide_index=True,
+            )
 
         with tab_r3:
             d3, c3 = _pivot_for_display(r3)
-            st.dataframe(d3, use_container_width=True, column_config=c3, hide_index=True)
+            st.dataframe(
+                _style_numbers_pos_red_neg_green(d3),
+                use_container_width=True,
+                column_config=c3,
+                hide_index=True,
+            )
 
         with tab_dl:
             xl = sr.to_excel_bytes(
