@@ -114,7 +114,8 @@ def _style_numbers_pos_red_neg_green(
                 return "color: #52c41a;"  # green
             return ""
 
-        return df.style.map(_cell, subset=num_cols)
+        # 顯示用：避免 1.0000000 這種浮點尾數（查驗數量通常是整數）
+        return df.style.format("{:,.0f}", subset=num_cols).map(_cell, subset=num_cols)
     except Exception:
         return df
 
@@ -213,13 +214,22 @@ with tab_verify:
 
     c0, c1 = st.columns([2, 1])
     with c0:
-        use_manual_customer = st.checkbox("手動輸入客戶", key="verify_use_manual_customer")
-        if cust_opts and not use_manual_customer:
-            customer_sel = st.selectbox(
+        # 客戶來源通常來自銷售統計（sales_df）。但查驗流程希望「先選客戶再上傳檔案」，
+        # 因此：有清單就提供下拉；沒有清單就直接手動輸入（不再用 checkbox 讓 UI 看起來像不能選）。
+        if cust_opts:
+            mode = st.selectbox(
                 "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
-                options=cust_opts,
-                key="verify_customer_sel",
+                options=["（手動輸入）"] + cust_opts,
+                index=0,
+                key="verify_customer_mode",
             )
+            if mode == "（手動輸入）":
+                customer_sel = st.text_input(
+                    "手動輸入客戶",
+                    key="verify_customer_sel_text",
+                ).strip()
+            else:
+                customer_sel = str(mode).strip()
         else:
             customer_sel = st.text_input(
                 "查驗客戶（用來撈該客戶當月累計銷售）",

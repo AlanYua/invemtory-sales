@@ -144,9 +144,14 @@ def compute_verify_v2_report(
     """
     報表顯示（值=QTY）：
       列：EAN/品名
-      欄：凌越(進/退/庫), 客戶(進/退/庫), 差異(進/退/庫), 差異-當月累計銷售(進/退/庫)
+      欄（固定輸出順序）：
+        凌越(庫存) / 客戶(庫存) / 差異(庫存) /
+        凌越(進貨) / 客戶(進貨) / 差異(進貨) /
+        凌越(退貨) / 客戶(退貨) / 差異(退貨) /
+        當月累計銷售
+
     差異 = 凌越 - 客戶
-    差異-當月累計銷售 = 差異 - sales_qty（月內該客戶 EAN 加總）
+    當月累計銷售 = 依 customer + report_date 區間，按 EAN 加總 qty
     """
     s = aggregate_verify_v2(system_df).rename(columns={"數量": "qty_system"})
     c = aggregate_verify_v2(customer_df).rename(columns={"數量": "qty_customer"})
@@ -168,12 +173,10 @@ def compute_verify_v2_report(
     )
     m = m.merge(sales_g, on=["EAN"], how="left")
     m["sales_qty"] = _coerce_qty(m.get("sales_qty"))
-    m["qty_diff_minus_sales"] = m["qty_diff"] - m["sales_qty"]
-
     out = m.pivot_table(
         index=["EAN", "品名"],
         columns="類型",
-        values=["qty_system", "qty_customer", "qty_diff", "qty_diff_minus_sales"],
+        values=["qty_system", "qty_customer", "qty_diff"],
         aggfunc="sum",
         fill_value=0,
     )
@@ -181,11 +184,42 @@ def compute_verify_v2_report(
         "qty_system": "凌越",
         "qty_customer": "客戶",
         "qty_diff": "差異",
-        "qty_diff_minus_sales": "差異-當月累計銷售",
     }
     out.columns = [f"{rename0.get(a, str(a))}({b})" for a, b in out.columns.to_list()]
     out = out.reset_index()
-    return out
+
+    # 當月累計銷售：每個 EAN 一個值（不分 進/退/庫 類型）
+    sales_out = sales_g[["EAN", "sales_qty"]].copy() if isinstance(sales_g, pd.DataFrame) else None
+    if sales_out is None or len(sales_out) == 0:
+        out["當月累計銷售"] = 0
+    else:
+        sales_out = sales_out.copy()
+        sales_out["EAN"] = sales_out["EAN"].astype(str).str.strip()
+        sales_out["sales_qty"] = _coerce_qty(sales_out["sales_qty"])
+        out["EAN"] = out["EAN"].astype(str).str.strip()
+        out = out.merge(sales_out, on="EAN", how="left")
+        out["當月累計銷售"] = _coerce_qty(out.get("sales_qty"))
+        out = out.drop(columns=["sales_qty"])
+
+    # 欄位固定順序（缺欄補 0）
+    want = [
+        "EAN",
+        "品名",
+        "凌越(庫存)",
+        "客戶(庫存)",
+        "差異(庫存)",
+        "凌越(進貨)",
+        "客戶(進貨)",
+        "差異(進貨)",
+        "凌越(退貨)",
+        "客戶(退貨)",
+        "差異(退貨)",
+        "當月累計銷售",
+    ]
+    for c in want:
+        if c not in out.columns:
+            out[c] = 0
+    return out[want]
 
 
 def aggregate_lines(
