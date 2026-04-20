@@ -127,24 +127,23 @@ def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styl
     """
     if df is None or len(df) == 0:
         return df
-    if "品牌" not in df.columns:
-        return df
     try:
         base = _style_numbers_pos_red_neg_green(df)
         styler = base if hasattr(base, "apply") else df.style
-        sub = getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）")
-        is_sub = df["品牌"].astype(str) == str(sub)
-        is_month_total = df["品牌"].astype(str) == "（整月加總）"
-        is_margin = df["品牌"].astype(str) == str(getattr(sr, "MARGIN_ROW", "欄合計"))
-        flag = is_sub | is_month_total | is_margin
+
+        sub = str(getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）"))
+        margin_row = str(getattr(sr, "MARGIN_ROW", "欄合計"))
+        labels = {sub, "（整月加總）", margin_row}
+
+        obj_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+        if not obj_cols:
+            return styler
+        flag = df[obj_cols].astype(str).isin(labels).any(axis=1)
 
         def _row_style(row: pd.Series) -> list[str]:
             if not bool(flag.loc[row.name]):
                 return [""] * len(row)
-            # 深色系：讓小計「更亮更粗」，避免看起來反灰
-            return ["font-weight: 700; color: #E6E6E6; background-color: rgba(255,255,255,0.06)"] * len(
-                row
-            )
+            return ["font-weight: 700; background-color: rgba(160,160,160,0.18)"] * len(row)
 
         return styler.apply(_row_style, axis=1)
     except Exception:
@@ -576,7 +575,7 @@ with tab_sales:
         with tab_r2:
             d2, c2 = _pivot_for_display(r2)
             st.dataframe(
-                _style_numbers_pos_red_neg_green(d2),
+                _style_report1_week_subtotals(d2),
                 use_container_width=True,
                 column_config=c2,
                 hide_index=True,
@@ -585,7 +584,7 @@ with tab_sales:
         with tab_r3:
             d3, c3 = _pivot_for_display(r3)
             st.dataframe(
-                _style_numbers_pos_red_neg_green(d3),
+                _style_report1_week_subtotals(d3),
                 use_container_width=True,
                 column_config=c3,
                 hide_index=True,
