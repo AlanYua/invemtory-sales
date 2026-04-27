@@ -547,8 +547,8 @@ with tab_sales:
             report_date_to=month_end,
         )
 
-        all_brands = sorted(df_view["brand"].unique())
-        all_customers = sorted(df_view["customer"].unique())
+        all_brands = sorted(df_view["brand"].dropna().astype(str).str.strip().unique())
+        all_customers = sorted(df_view["customer"].dropna().astype(str).str.strip().unique())
         br12 = st.multiselect("品牌（1、2）", all_brands, default=[], key="br12")
         df_r12 = sr.filter_brands(df_base, br12 or None)
         br3 = st.multiselect("品牌（3）", all_brands, default=[], key="br3")
