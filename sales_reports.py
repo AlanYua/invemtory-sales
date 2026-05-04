@@ -440,6 +440,10 @@ def sales_df_for_calendar_month(
     if len(d) == 0:
         return d
     d = expand_weekly_cross_calendar_months(d)
+    # expand 內 concat / 列組裝後 report_date 可能變 object；再轉一次避免 .dt AttributeError
+    d = ensure_start_report_datetimes(d).dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return d.iloc[0:0]
     is_m = d["qty_kind"].map(is_monthly_kind)
     rd = d["report_date"].dt.normalize()
     sel = (rd >= ms) & (rd <= me)
