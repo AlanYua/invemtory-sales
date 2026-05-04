@@ -529,6 +529,20 @@ def filter_customers(df: pd.DataFrame, customers: list[str] | None) -> pd.DataFr
     return df[df["customer"].isin(customers)]
 
 
+def df_for_report_pivots_weekly_preferred(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    報表 1～3 共用：只要資料裡有任一 weekly 列，就只保留 weekly（月底 monthly 不進 pivot 加總）；
+    若全為 monthly 則保留全部，避免空白。
+    """
+    if df is None or len(df) == 0:
+        return df
+    d = ensure_start_report_datetimes(df.copy())
+    wk_mask = ~d["qty_kind"].map(is_monthly_kind)
+    if bool(wk_mask.any()):
+        return d.loc[wk_mask].copy()
+    return d
+
+
 def sort_and_margin_pivot(p: pd.DataFrame, *, brand_first: bool = False) -> pd.DataFrame:
     """
     純資料 pivot（無 pandas margins）：欄依欄合計由高到低排序；
@@ -648,11 +662,17 @@ def _pivot_report1_period_subtotals(p: pd.DataFrame) -> pd.DataFrame:
 
 
 def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """列: 週區間／品牌，每週末列週小計；欄: customer；底列欄合計僅加明細。"""
+    """
+    列: 週區間／品牌（一律以週區間展示）；欄: customer（每客戶一欄，不分週/月來源）；底列欄合計僅加明細。
+
+    每月最後一天的 monthly 上傳用於對帳／增量（integrate、expand）；與報表 2、3 相同，
+    經 df_for_report_pivots_weekly_preferred：有 weekly 則 pivot 不含 monthly。
+    """
     if len(df) == 0:
         return pd.DataFrame()
-    d = df.copy()
-    d = ensure_start_report_datetimes(d)
+    d = df_for_report_pivots_weekly_preferred(df)
+    if d is None or len(d) == 0:
+        return pd.DataFrame()
 
     # 報表 1 列「週區間」：
     # - weekly：以上傳的 Start_date~report_date 為週區間（例 4/1~4/27、4/28~5/3）；缺 Start_date 或起>迄時退回 ISO 週一~週日
@@ -681,12 +701,10 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
             d.loc[has_parent, "_period"].astype(str) + "（原：" + ps.loc[has_parent] + "）"
         )
 
-    # weekly / monthly 分欄顯示
-    d["_kind"] = d["qty_kind"].map(lambda x: "Monthly" if is_monthly_kind(x) else "Weekly")
     p = pd.pivot_table(
         d,
         index=["_period", "brand"],
-        columns=["_kind", "customer"],
+        columns="customer",
         values="qty",
         aggfunc="sum",
         fill_value=0,
@@ -747,6 +765,9 @@ def report2_pivot(df: pd.DataFrame) -> pd.DataFrame:
     """列: brand, EAN, Name；欄: customer（跨 store 加總）；值: qty；品牌依小計高到低、同品牌內列合計高到低；欄依欄合計。"""
     if len(df) == 0:
         return pd.DataFrame()
+    df = df_for_report_pivots_weekly_preferred(df)
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
     p = pd.pivot_table(
         df,
         index=["brand", "EAN", "Name"],
@@ -765,6 +786,9 @@ def report3_pivot(df: pd.DataFrame) -> pd.DataFrame:
     品牌依小計高到低、同品牌內列合計高到低；欄依欄合計。
     """
     if len(df) == 0:
+        return pd.DataFrame()
+    df = df_for_report_pivots_weekly_preferred(df)
+    if df is None or len(df) == 0:
         return pd.DataFrame()
     multi_cust = df["customer"].nunique() > 1
     cols: str | list[str] = ["customer", "store"] if multi_cust else "store"
