@@ -145,6 +145,37 @@ def _supabase_401_hint() -> str:
     )
 
 
+def df_intersects_month_strings(df: pd.DataFrame, months: set[str]) -> bool:
+    """任一列的 Start_date 或 report_date 落在 months（'YYYY/MM'）即 True。"""
+    if not months or df is None or len(df) == 0:
+        return False
+    if "Start_date" not in df.columns or "report_date" not in df.columns:
+        return False
+    d = sr.ensure_start_report_datetimes(df.copy())
+    sd = pd.to_datetime(d["Start_date"], errors="coerce")
+    rd = pd.to_datetime(d["report_date"], errors="coerce")
+    m1 = sd.notna() & sd.dt.strftime("%Y/%m").isin(months)
+    m2 = rd.notna() & rd.dt.strftime("%Y/%m").isin(months)
+    return bool((m1 | m2).any())
+
+
+def batch_intersects_closed_months(batch: dict[str, Any], closed: set[str]) -> bool:
+    """批次內資料是否涉及已結案月份（不可刪／不可取代）。"""
+    if not closed:
+        return False
+    kind = batch.get("kind") or "upload"
+    if kind == "upload":
+        raw = batch.get("raw")
+        return df_intersects_month_strings(raw, closed) if isinstance(raw, pd.DataFrame) else False
+    if kind == "snapshot":
+        sdf = batch.get("sales_df")
+        return df_intersects_month_strings(sdf, closed) if isinstance(sdf, pd.DataFrame) else False
+    if kind == "baseline_override":
+        bl = batch.get("monthly_baseline")
+        return df_intersects_month_strings(bl, closed) if isinstance(bl, pd.DataFrame) else False
+    return False
+
+
 def replay_from_batches(batches: list[dict[str, Any]]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """依序重播批次 → sales_df、monthly_baseline、最後一次 monthly debug。"""
     baseline = _empty_baseline()
@@ -218,34 +249,58 @@ def _migrate_old_blob(blob: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def load_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
+def load_closed_months() -> list[str]:
+    """僅讀取已結案月份（供 session 缺欄時補齊，不重載 batches）。"""
     if not supabase_configured():
-        return pd.DataFrame(), _empty_baseline(), pd.DataFrame(), []
+        return []
+    try:
+        blob = _cloud_load_blob()
+    except Exception:
+        return []
+    if not blob:
+        return []
+    cm = blob.get("closed_months") or []
+    if not isinstance(cm, list):
+        return []
+    return sorted({str(x).strip() for x in cm if str(x).strip()})
+
+
+def load_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]], list[str]]:
+    if not supabase_configured():
+        return pd.DataFrame(), _empty_baseline(), pd.DataFrame(), [], []
     blob: dict[str, Any] | None = None
     try:
         blob = _cloud_load_blob()
     except Exception:
         blob = None
     if blob is None:
-        return pd.DataFrame(), _empty_baseline(), pd.DataFrame(), []
+        return pd.DataFrame(), _empty_baseline(), pd.DataFrame(), [], []
     batches = _migrate_old_blob(blob)
     sales_df, baseline, dbg = replay_from_batches(batches)
-    return sales_df, baseline, dbg, batches
+    cm = blob.get("closed_months") or []
+    if not isinstance(cm, list):
+        cm = []
+    cm = sorted({str(x).strip() for x in cm if str(x).strip()})
+    return sales_df, baseline, dbg, batches, cm
 
 
 def save_state(
     upload_batches: list[dict[str, Any]],
+    *,
+    closed_months: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """寫入 Supabase；回傳重播後的 (sales_df, baseline, last_dbg)。"""
+    """寫入 Supabase；回傳重播後的 (sales_df, baseline, last_dbg)。closed_months 一併持久化。"""
     if not supabase_configured():
         raise RuntimeError(
             "未設定 Supabase：請在 Streamlit Secrets（或環境變數）設定 "
             "`SUPABASE_URL` 與 `SUPABASE_SERVICE_ROLE_KEY`，並在資料庫執行 `supabase_schema.sql`。"
         )
     sales_df, baseline, dbg = replay_from_batches(upload_batches)
+    cm = sorted({str(x).strip() for x in closed_months if str(x).strip()})
     out_blob = {
         "upload_batches": upload_batches,
         "last_monthly_debug": dbg,
+        "closed_months": cm,
     }
     _cloud_write_blob(out_blob)
     return sales_df, baseline, dbg

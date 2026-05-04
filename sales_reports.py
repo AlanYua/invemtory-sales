@@ -447,8 +447,7 @@ def reconcile_month_cumulative_display(
     曆月內「累積 monthly」與週列的顯示用整理：
 
     - **Weekly 上傳＋月底 monthly（累積）**：保留原 weekly；以最後一次 monthly 的累積為準，
-      若月底 > 最後一筆 weekly 的 report_date，補一列
-      ``(最後週迄日+1)～月底``，qty＝累積 − Σ(weekly.qty)。
+      若月底 > 最後一筆 weekly 的 report_date，將尾差 **併入該週上傳列的 qty**（不另建新區間列）。
 
     - **僅 monthly 累積、依序上傳**：刪 monthly，改為區間列
       ``月初 或 上一筆 report_date 次日 ～ 本次 report_date``，qty＝累積快照差。
@@ -494,16 +493,12 @@ def reconcile_month_cumulative_display(
             cum_final = _monthly_cumulative_value(m_last)
             tail = cum_final - sum_w
             if last_end < me and abs(tail) > 1e-9:
-                tmpl = w_sub.iloc[0].to_dict()
-                nr = {**tmpl, **key_m}
-                nr["Start_date"] = last_end + pd.Timedelta(days=1)
-                nr["report_date"] = me
-                nr["qty_kind"] = "weekly"
-                nr["qty"] = float(tail)
-                for k in ("qty_cumulative_raw", "qty_incremental", "parent_period"):
-                    if k in nr:
-                        nr[k] = pd.NA
-                new_rows.append(nr)
+                rd_w = pd.to_datetime(w_sub["report_date"], errors="coerce").dt.normalize()
+                mx = rd_w.max()
+                idx_last = w_sub.index[rd_w == mx][0]
+                cur = pd.to_numeric(d.loc[idx_last, "qty"], errors="coerce")
+                cur_f = float(cur) if pd.notna(cur) else 0.0
+                d.loc[idx_last, "qty"] = cur_f + float(tail)
         else:
             tmpl = m_sub.iloc[0].to_dict()
             prev_end = ms - pd.Timedelta(days=1)
@@ -793,7 +788,7 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     # 報表 1 列「週區間」：
-    # - weekly：以上傳的 Start_date~report_date 為週區間（例 4/1~4/27、4/28~5/3）；缺 Start_date 或起>迄時退回 ISO 週一~週日
+    # - weekly：以上傳 Start_date~report_date；若有 parent_period（跨月拆段）則用原上傳區間；起>迄或缺時退回 ISO 週一~週日
     # - monthly（累積）：report_date 所屬曆月 1 號~月底
     rd = pd.to_datetime(d["report_date"], errors="coerce")
     rd_norm = rd.dt.normalize()
@@ -811,13 +806,12 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
     period_wk = period_iso.where(bad_wk, period_actual)
     period_mo = mo_period_start.dt.strftime("%Y-%m-%d") + "~" + mo_period_end.dt.strftime("%Y-%m-%d")
     d["_period"] = period_mo.where(is_m_row, period_wk)
+    # 跨月拆段列：週區間以上傳原區間為準（與 expand 的 parent_period 一致），不再顯示拆段後日期
     if "parent_period" in d.columns:
         pp = d["parent_period"]
         ps = pp.astype("string")
         has_parent = (~is_m_row) & pp.notna() & ps.str.strip().ne("")
-        d.loc[has_parent, "_period"] = (
-            d.loc[has_parent, "_period"].astype(str) + "（原：" + ps.loc[has_parent] + "）"
-        )
+        d.loc[has_parent, "_period"] = ps.loc[has_parent].astype(str).str.strip()
 
     p = pd.pivot_table(
         d,

@@ -173,6 +173,7 @@ with st.sidebar:
     if st.button("登出"):
         st.session_state.auth_ok = False
         st.rerun()
+    st.caption("月結案／解除：「2. 銷售統計」→ 月結案、月結案管理")
 
 st.title("庫存查驗 / 銷售統計")
 
@@ -335,12 +336,108 @@ with tab_sales:
     f_sales = st.file_uploader("銷售資料（可多次上傳合併）", type=["xlsx", "xls"], key="sales")
 
     if "sales_state_initialized" not in st.session_state:
-        sdf, mbl, ldg, batches = ps.load_state()
+        sdf, mbl, ldg, batches, cm = ps.load_state()
         st.session_state.upload_batches = batches
         st.session_state.sales_df = sdf
         st.session_state.monthly_baseline = mbl
         st.session_state.last_monthly_debug = ldg
+        st.session_state.closed_months = cm
         st.session_state.sales_state_initialized = True
+    elif "closed_months" not in st.session_state:
+        st.session_state.closed_months = ps.load_closed_months()
+
+    def _closed_month_set() -> set[str]:
+        return set(st.session_state.get("closed_months") or [])
+
+    with st.expander("月結案", expanded=False):
+        st.caption(
+            "結案後：該曆月不可再上傳新資料；含該月之批次不可刪除、不可取代。"
+        )
+        cm_cur = sorted(_closed_month_set())
+        if cm_cur:
+            st.info("已結案月份：" + "、".join(cm_cur))
+        else:
+            st.caption("目前尚無已結案月份。")
+        df_all_mc = st.session_state.get("sales_df")
+        opts_mc: list[str] = []
+        if isinstance(df_all_mc, pd.DataFrame) and len(df_all_mc):
+            dmc = sr.ensure_start_report_datetimes(df_all_mc)
+            r1 = pd.to_datetime(dmc["report_date"], errors="coerce").dropna()
+            s1 = pd.to_datetime(dmc["Start_date"], errors="coerce").dropna()
+            opts_mc = sorted(
+                set(r1.dt.strftime("%Y/%m").unique().tolist())
+                | set(s1.dt.strftime("%Y/%m").unique().tolist())
+            )
+        if not opts_mc:
+            opts_mc = [pd.Timestamp.today().strftime("%Y/%m")]
+        ix_mc = st.selectbox(
+            "選擇要結案的月份（YYYY/MM）",
+            range(len(opts_mc)),
+            format_func=lambda i: opts_mc[i],
+            key="month_close_pick",
+        )
+        sel_close_m = opts_mc[ix_mc]
+        already = sel_close_m in _closed_month_set()
+        if st.button(
+            "月結案",
+            key="btn_month_close",
+            disabled=not ps.supabase_configured() or already,
+            help=None if ps.supabase_configured() else "需設定 Supabase 才能寫入結案狀態",
+        ):
+            try:
+                ncm = sorted(_closed_month_set() | {sel_close_m})
+                st.session_state.closed_months = ncm
+                sdf, mbl, ldg = ps.save_state(
+                    st.session_state.upload_batches,
+                    closed_months=ncm,
+                )
+                st.session_state.sales_df = sdf
+                st.session_state.monthly_baseline = mbl
+                st.session_state.last_monthly_debug = ldg
+                st.success(f"已結案：{sel_close_m}（此後不可再上傳或刪改該月相關批次）")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        if already:
+            st.caption(f"「{sel_close_m}」已結案。")
+
+    with st.expander("月結案管理", expanded=False):
+        st.caption(
+            "取消結案後，該曆月可再上傳／可刪除或取代含該月之批次。僅限已登入管理員操作。"
+        )
+        cm_list = sorted(_closed_month_set())
+        if not cm_list:
+            st.caption("目前無已結案月份。")
+        else:
+            to_open = st.multiselect(
+                "選擇要解除結案的月份（可多選）",
+                options=cm_list,
+                default=[],
+                key="month_reopen_pick",
+            )
+            if st.button(
+                "取消結案並寫入雲端",
+                key="btn_month_reopen",
+                disabled=not ps.supabase_configured() or len(to_open) == 0,
+                help=None if ps.supabase_configured() else "需設定 Supabase",
+            ):
+                try:
+                    ncm = sorted(_closed_month_set() - set(to_open))
+                    st.session_state.closed_months = ncm
+                    sdf, mbl, ldg = ps.save_state(
+                        st.session_state.upload_batches,
+                        closed_months=ncm,
+                    )
+                    st.session_state.sales_df = sdf
+                    st.session_state.monthly_baseline = mbl
+                    st.session_state.last_monthly_debug = ldg
+                    st.success(
+                        "已解除結案：" + "、".join(to_open) + "；其餘已結案："
+                        + ("、".join(ncm) if ncm else "（無）")
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
     if not f_sales:
         st.session_state.pop("_sales_ingested_sig", None)
@@ -351,10 +448,16 @@ with tab_sales:
                 f_sales.seek(0)
                 raw = pd.read_excel(f_sales)
                 raw = sr.load_sales(raw)
+                if ps.df_intersects_month_strings(raw, _closed_month_set()):
+                    raise ValueError(
+                        "此檔含「已結案」月份之資料，無法上傳。請移除該月列或先不要結案該月。"
+                    )
                 nm = getattr(f_sales, "name", "") or ""
                 nb = ps.new_upload_batch(nm, raw)
                 nxt = [*st.session_state.upload_batches, nb]
-                sdf, mbl, ldg = ps.save_state(nxt)
+                sdf, mbl, ldg = ps.save_state(
+                    nxt, closed_months=st.session_state.get("closed_months", [])
+                )
                 st.session_state.upload_batches = nxt
                 st.session_state.sales_df = sdf
                 st.session_state.monthly_baseline = mbl
@@ -375,6 +478,11 @@ with tab_sales:
             ix = st.selectbox("選擇要處理的批次", range(len(labels)), format_func=lambda j: labels[j])
             sel_id = batches[ix]["id"]
             sel_kind = batches[ix].get("kind") or "upload"
+            batch_locked = ps.batch_intersects_closed_months(
+                batches[ix], _closed_month_set()
+            )
+            if batch_locked:
+                st.warning("此批次含已結案月份資料，不可刪除或取代。")
             fu_rep = st.file_uploader(
                 "取代用 Excel",
                 type=["xlsx", "xls"],
@@ -382,9 +490,15 @@ with tab_sales:
             )
             c_rm, c_rp = st.columns(2)
             with c_rm:
-                if st.button("移除此批次並重算", key="batch_remove"):
+                if st.button(
+                    "移除此批次並重算",
+                    key="batch_remove",
+                    disabled=batch_locked,
+                ):
                     nxt = [b for b in batches if b["id"] != sel_id]
-                    sdf, mbl, ldg = ps.save_state(nxt)
+                    sdf, mbl, ldg = ps.save_state(
+                        nxt, closed_months=st.session_state.get("closed_months", [])
+                    )
                     st.session_state.upload_batches = nxt
                     st.session_state.sales_df = sdf
                     st.session_state.monthly_baseline = mbl
@@ -392,7 +506,11 @@ with tab_sales:
                     st.success("已移除。")
                     st.rerun()
             with c_rp:
-                if st.button("用新檔取代此批次", key="batch_replace"):
+                if st.button(
+                    "用新檔取代此批次",
+                    key="batch_replace",
+                    disabled=batch_locked,
+                ):
                     if sel_kind == "baseline_override":
                         st.warning("baseline 批次請先移除。")
                     elif fu_rep is None:
@@ -400,10 +518,17 @@ with tab_sales:
                     else:
                         try:
                             raw = sr.load_sales(pd.read_excel(fu_rep))
+                            if ps.df_intersects_month_strings(raw, _closed_month_set()):
+                                raise ValueError(
+                                    "新檔含已結案月份，無法取代此批次。"
+                                )
                             nb = ps.new_upload_batch(getattr(fu_rep, "name", "") or "", raw)
                             nb_list = list(batches)
                             nb_list[ix] = nb
-                            sdf, mbl, ldg = ps.save_state(nb_list)
+                            sdf, mbl, ldg = ps.save_state(
+                                nb_list,
+                                closed_months=st.session_state.get("closed_months", []),
+                            )
                             st.session_state.upload_batches = nb_list
                             st.session_state.sales_df = sdf
                             st.session_state.monthly_baseline = mbl
@@ -443,13 +568,19 @@ with tab_sales:
                         if hasattr(up_bl, "seek"):
                             up_bl.seek(0)
                         bl = sr.load_monthly_baseline(pd.read_excel(up_bl))
+                        if ps.df_intersects_month_strings(bl, _closed_month_set()):
+                            raise ValueError(
+                                "baseline 含已結案月份，無法覆寫。"
+                            )
                         nxt = [
                             *st.session_state.upload_batches,
                             ps.new_baseline_override_batch(
                                 getattr(up_bl, "name", "") or "", bl
                             ),
                         ]
-                        sdf, mbl, ldg = ps.save_state(nxt)
+                        sdf, mbl, ldg = ps.save_state(
+                            nxt, closed_months=st.session_state.get("closed_months", [])
+                        )
                         st.session_state.upload_batches = nxt
                         st.session_state.sales_df = sdf
                         st.session_state.monthly_baseline = mbl
