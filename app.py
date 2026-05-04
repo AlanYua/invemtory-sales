@@ -537,14 +537,15 @@ with tab_sales:
 
         with c3:
             st.caption(
-                f"查詢區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}（整月，以 report_date 篩選）｜"
-                f"所選銷售日週別：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
+                f"查詢區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}（monthly 依 report_date；"
+                f"weekly 跨兩曆月：有同月 monthly 時首段＝該月 monthly 加總−同鍵較早 weekly，尾段＝週總−首段；否則依天數比例）｜"
+                f"所選銷售日 ISO 週：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
             )
 
-        df_base = sr.filter_start_report_dates(
+        df_base = sr.sales_df_for_calendar_month(
             dv,
-            report_date_from=month_start,
-            report_date_to=month_end,
+            month_start=month_start,
+            month_end=month_end,
         )
 
         all_brands = sorted(df_view["brand"].dropna().astype(str).str.strip().unique())

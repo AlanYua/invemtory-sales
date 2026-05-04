@@ -38,6 +38,9 @@ MONTHLY_BASELINE_KEYS = [
     "store",
 ]
 
+# 跨月週與 monthly 對帳用（不含 Start_date；與月底 monthly 列加總對齊）
+WEEKLY_RECONCILE_KEYS = ["customer", "brand", "EAN", "Name", "store"]
+
 
 def is_monthly_kind(v: object) -> bool:
     s = str(v).strip().lower()
@@ -251,6 +254,204 @@ def ensure_start_report_datetimes(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _monthly_qty_sum_by_month(m: pd.DataFrame) -> dict[tuple, float]:
+    """(customer, brand, EAN, Name, store, Period[M]) -> 該曆月內所有 monthly 列 qty 加總（已為增量）。"""
+    if m is None or len(m) == 0:
+        return {}
+    out: dict[tuple, float] = {}
+    for _, r in m.iterrows():
+        ym = pd.Timestamp(r["report_date"]).to_period("M")
+        k = tuple(str(r[c]) for c in WEEKLY_RECONCILE_KEYS) + (ym,)
+        qv = pd.to_numeric(r["qty"], errors="coerce")
+        out[k] = out.get(k, 0.0) + (0.0 if pd.isna(qv) else float(qv))
+    return out
+
+
+def _prior_weekly_sum_same_month_before(
+    w_ref: pd.DataFrame,
+    *,
+    orig_ix: int,
+    row_keys: tuple[str, ...],
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    start_before: pd.Timestamp,
+) -> float:
+    """同鍵、report_date 落在 [month_start, month_end] 且 < start_before，排除原列 orig_ix。"""
+    if len(w_ref) == 0:
+        return 0.0
+    rd = w_ref["report_date"].dt.normalize()
+    msk = w_ref["_orig_ix"] != orig_ix
+    msk &= rd >= pd.Timestamp(month_start).normalize()
+    msk &= rd <= pd.Timestamp(month_end).normalize()
+    msk &= rd < pd.Timestamp(start_before).normalize()
+    for i, c in enumerate(WEEKLY_RECONCILE_KEYS):
+        msk &= w_ref[c].astype(str) == row_keys[i]
+    sub = w_ref.loc[msk, "qty"]
+    return float(pd.to_numeric(sub, errors="coerce").fillna(0).sum())
+
+
+def expand_weekly_cross_calendar_months(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    將跨曆月的 weekly 列拆成多列，每列 Start_date~report_date 完全落在一個曆月內
+    （例 4/28~5/3 → 4/28~4/30、5/1~5/3）。
+
+    拆法（僅「恰好跨兩個曆月」時）：
+    - 若該週「首曆月」內已有同鍵 monthly（如 4/30 上傳的 4/1~4/30 增量加總），且能對到資料：
+      首段 qty = clip(該月 monthly qty 加總 − 同鍵下該月 report_date < 本週起點 的 weekly 加總, 0, 本列週 qty)；
+      次段 qty = 本列週 qty − 首段（即 5/1~5/3 由 4/28~5/3 扣掉推算的 4/28~4/30）。
+    - 否則：依各段曆日數占原區間比例分配（舊行為）。
+
+    未跨月者原列不變。monthly 列原樣通過。
+    拆段列會帶 parent_period＝原上傳區間字串；未拆者為 NaN。
+    """
+    if df is None or len(df) == 0:
+        return df
+    d = ensure_start_report_datetimes(df).dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return d
+    is_m = d["qty_kind"].map(is_monthly_kind)
+    m = d[is_m].copy()
+    w = d[~is_m].copy()
+    if "parent_period" not in m.columns and len(m):
+        m["parent_period"] = pd.NA
+    if len(w) == 0:
+        return m if len(m) else d.iloc[0:0]
+
+    monthly_by_ym = _monthly_qty_sum_by_month(m)
+    w_ref = w.copy()
+    w_ref["_orig_ix"] = w_ref.index.to_numpy()
+
+    out_w: list[pd.Series] = []
+    for _, row in w.iterrows():
+        S = pd.Timestamp(row["Start_date"]).normalize()
+        E = pd.Timestamp(row["report_date"]).normalize()
+        q = pd.to_numeric(row["qty"], errors="coerce")
+        q = 0.0 if pd.isna(q) else float(q)
+        q_inc = row["qty_incremental"] if "qty_incremental" in row.index else None
+        q_inc_num = pd.to_numeric(q_inc, errors="coerce")
+        q_inc_f = float(q_inc_num) if pd.notna(q_inc_num) else None
+
+        if pd.isna(S) or pd.isna(E) or S > E:
+            nr = row.copy()
+            nr["parent_period"] = pd.NA
+            out_w.append(nr)
+            continue
+
+        if S.to_period("M") == E.to_period("M"):
+            nr = row.copy()
+            nr["parent_period"] = pd.NA
+            out_w.append(nr)
+            continue
+
+        total_days = int((E - S).days) + 1
+        if total_days <= 0:
+            nr = row.copy()
+            nr["parent_period"] = pd.NA
+            out_w.append(nr)
+            continue
+
+        parent = f"{S:%Y-%m-%d}~{E:%Y-%m-%d}"
+        prange = pd.period_range(S.to_period("M"), E.to_period("M"), freq="M")
+        n_mon = len(prange)
+
+        if n_mon == 2:
+            m_first = S.to_period("M")
+            m0 = m_first.to_timestamp().normalize()
+            m1 = pd.Timestamp(m0 + pd.offsets.MonthEnd(0)).normalize()
+            rk = tuple(str(row[c]) for c in WEEKLY_RECONCILE_KEYS)
+            M_inc = monthly_by_ym.get(rk + (m_first,), 0.0)
+            orig_ix = row.name
+            prior = _prior_weekly_sum_same_month_before(
+                w_ref,
+                orig_ix=orig_ix,
+                row_keys=rk,
+                month_start=m0,
+                month_end=m1,
+                start_before=S,
+            )
+            if M_inc > 0:
+                q_first = min(max(M_inc - prior, 0.0), q)
+                q_second = q - q_first
+                m_second = prange[1]
+                m2_start = m_second.to_timestamp().normalize()
+                m2_end = pd.Timestamp(m2_start + pd.offsets.MonthEnd(0)).normalize()
+                segs = [
+                    (max(S, m0), min(E, m1), q_first),
+                    (max(S, m2_start), min(E, m2_end), q_second),
+                ]
+                for seg_s, seg_e, qseg in segs:
+                    if seg_s > seg_e or qseg == 0.0:
+                        continue
+                    nr = row.copy()
+                    nr["Start_date"] = seg_s
+                    nr["report_date"] = seg_e
+                    nr["qty"] = qseg
+                    nr["parent_period"] = parent
+                    if q_inc_f is not None and q > 0:
+                        nr["qty_incremental"] = q_inc_f * (qseg / q)
+                    elif q_inc_f is not None:
+                        nr["qty_incremental"] = 0.0
+                    out_w.append(nr)
+                continue
+
+        for per in prange:
+            m0 = per.to_timestamp().normalize()
+            m1 = pd.Timestamp(m0 + pd.offsets.MonthEnd(0)).normalize()
+            seg_s = max(S, m0)
+            seg_e = min(E, m1)
+            if seg_s > seg_e:
+                continue
+            seg_days = int((seg_e - seg_s).days) + 1
+            f = seg_days / float(total_days)
+            nr = row.copy()
+            nr["Start_date"] = seg_s
+            nr["report_date"] = seg_e
+            nr["qty"] = q * f
+            nr["parent_period"] = parent
+            if q_inc_f is not None:
+                nr["qty_incremental"] = q_inc_f * f
+            out_w.append(nr)
+
+    w2 = pd.DataFrame(out_w) if out_w else w.iloc[0:0]
+    if len(m) and len(w2):
+        return pd.concat([m, w2], axis=0, ignore_index=True)
+    if len(w2):
+        return w2.reset_index(drop=True)
+    return m.reset_index(drop=True) if len(m) else d.iloc[0:0]
+
+
+def sales_df_for_calendar_month(
+    df: pd.DataFrame,
+    *,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    依「曆月」做銷售檢視用資料列（會 copy）：
+    - monthly：只保留 report_date 落在 [month_start, month_end] 者，qty 不變。
+    - weekly：先 expand_weekly_cross_calendar_months（跨兩曆月且有該月 monthly 時用對帳拆段），
+      再只保留 report_date 落在 [month_start, month_end] 者。
+    """
+    if df is None or len(df) == 0:
+        return df
+    ms = pd.Timestamp(month_start).normalize()
+    me = pd.Timestamp(month_end).normalize()
+    d = ensure_start_report_datetimes(df).dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return d
+    d = expand_weekly_cross_calendar_months(d)
+    is_m = d["qty_kind"].map(is_monthly_kind)
+    rd = d["report_date"].dt.normalize()
+    sel = (rd >= ms) & (rd <= me)
+    out = d.loc[sel].copy()
+    if len(out) == 0:
+        return d.iloc[0:0]
+    return out.sort_values(
+        ["report_date", "customer", "brand", "EAN", "store"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
 def filter_start_report_dates(
     df: pd.DataFrame,
     *,
@@ -449,14 +650,32 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d = ensure_start_report_datetimes(d)
 
-    # 報表 1 一律以 report_date 所屬週（週一~週日）分週區間：
-    # - weekly：自然落在該週
-    # - monthly（累積）：以該筆 report_date 落在哪週就歸到那週（例：12 號→ 04/06~04/12）
+    # 報表 1 列「週區間」：
+    # - weekly：以上傳的 Start_date~report_date 為週區間（例 4/1~4/27、4/28~5/3）；缺 Start_date 或起>迄時退回 ISO 週一~週日
+    # - monthly（累積）：report_date 所屬曆月 1 號~月底
     rd = pd.to_datetime(d["report_date"], errors="coerce")
     rd_norm = rd.dt.normalize()
+    sd_norm = pd.to_datetime(d["Start_date"], errors="coerce").dt.normalize()
     wk_start = rd_norm - pd.to_timedelta(rd_norm.dt.weekday, unit="D")
     wk_end = wk_start + pd.Timedelta(days=6)
-    d["_period"] = wk_start.dt.strftime("%Y-%m-%d") + "~" + wk_end.dt.strftime("%Y-%m-%d")
+    mo_period_start = rd_norm.dt.to_period("M").dt.to_timestamp()
+    mo_period_end = pd.to_datetime(
+        mo_period_start + pd.offsets.MonthEnd(0), errors="coerce"
+    ).dt.normalize()
+    is_m_row = d["qty_kind"].map(is_monthly_kind)
+    period_iso = wk_start.dt.strftime("%Y-%m-%d") + "~" + wk_end.dt.strftime("%Y-%m-%d")
+    bad_wk = sd_norm.isna() | (sd_norm > rd_norm)
+    period_actual = sd_norm.dt.strftime("%Y-%m-%d") + "~" + rd_norm.dt.strftime("%Y-%m-%d")
+    period_wk = period_iso.where(bad_wk, period_actual)
+    period_mo = mo_period_start.dt.strftime("%Y-%m-%d") + "~" + mo_period_end.dt.strftime("%Y-%m-%d")
+    d["_period"] = period_mo.where(is_m_row, period_wk)
+    if "parent_period" in d.columns:
+        pp = d["parent_period"]
+        ps = pp.astype("string")
+        has_parent = (~is_m_row) & pp.notna() & ps.str.strip().ne("")
+        d.loc[has_parent, "_period"] = (
+            d.loc[has_parent, "_period"].astype(str) + "（原：" + ps.loc[has_parent] + "）"
+        )
 
     # weekly / monthly 分欄顯示
     d["_kind"] = d["qty_kind"].map(lambda x: "Monthly" if is_monthly_kind(x) else "Weekly")
