@@ -420,6 +420,164 @@ def expand_weekly_cross_calendar_months(df: pd.DataFrame) -> pd.DataFrame:
     return m.reset_index(drop=True) if len(m) else d.iloc[0:0]
 
 
+def _iso_monday(ts: pd.Timestamp) -> pd.Timestamp:
+    t = pd.Timestamp(ts).normalize()
+    return t - pd.Timedelta(days=int(t.weekday()))
+
+
+def _iso_week_sunday(mon: pd.Timestamp) -> pd.Timestamp:
+    return pd.Timestamp(mon).normalize() + pd.Timedelta(days=6)
+
+
+def _iso_mondays_intersecting(ms: pd.Timestamp, me: pd.Timestamp) -> list[pd.Timestamp]:
+    """與 [ms, me]（含）有交集的每個 ISO 週一（曆日可能略早於 ms）。"""
+    ms = pd.Timestamp(ms).normalize()
+    me = pd.Timestamp(me).normalize()
+    w = _iso_monday(ms)
+    out: list[pd.Timestamp] = []
+    while w <= me:
+        out.append(w)
+        w = w + pd.Timedelta(days=7)
+    return out
+
+
+def reconcile_iso_weeks_to_monthly_increment(
+    df: pd.DataFrame,
+    *,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    在單一曆月視窗內：若有 monthly 增量列（integrate 後之 qty），依 WEEKLY_RECONCILE_KEYS
+    與上傳 weekly 列對帳，改為 **ISO 週一～週日** 切分之 weekly 列，並縮放使該月內各段加總
+    **剛好等於**該鍵之 monthly 增量；對帳完刪除該月該鍵之 monthly 列，避免與週重複。
+
+    未出現在 monthly 對帳鍵之下之 weekly 列維持不變。
+    """
+    if df is None or len(df) == 0:
+        return df
+    ms = pd.Timestamp(month_start).normalize()
+    me = pd.Timestamp(month_end).normalize()
+    d = ensure_start_report_datetimes(df.copy()).dropna(subset=["Start_date", "report_date"])
+    if len(d) == 0:
+        return df
+
+    is_m = d["qty_kind"].map(is_monthly_kind)
+    rd = d["report_date"].dt.normalize()
+    sd = d["Start_date"].dt.normalize()
+
+    m_in_month = is_m & (rd >= ms) & (rd <= me)
+    if not bool(m_in_month.any()):
+        return df
+
+    def _rk_series(frame: pd.DataFrame) -> pd.Series:
+        parts = [frame[c].astype(str).str.strip() for c in WEEKLY_RECONCILE_KEYS]
+        return parts[0] + "\x1f" + parts[1] + "\x1f" + parts[2] + "\x1f" + parts[3] + "\x1f" + parts[4]
+
+    m_df = d.loc[m_in_month].copy()
+    monthly_inc = (
+        m_df.assign(_rk=_rk_series(m_df))
+        .groupby("_rk", sort=False)["qty"]
+        .sum()
+        .to_dict()
+    )
+
+    drop_ix: set[object] = set()
+    new_rows: list[dict] = []
+
+    for rk, m_inc in monthly_inc.items():
+        if pd.isna(m_inc) or abs(float(m_inc)) < 1e-15:
+            continue
+        m_inc_f = float(m_inc)
+        parts = rk.split("\x1f")
+        key_m = {WEEKLY_RECONCILE_KEYS[i]: parts[i] for i in range(len(WEEKLY_RECONCILE_KEYS))}
+
+        w_mask = ~is_m
+        for c, v in key_m.items():
+            w_mask &= d[c].astype(str).str.strip() == v
+        overlap = (sd <= me) & (rd >= ms)
+        w_ix = d.index[w_mask & overlap]
+        iso_qty: dict[pd.Timestamp, float] = {}
+
+        for ix in w_ix:
+            row = d.loc[ix]
+            S = pd.Timestamp(row["Start_date"]).normalize()
+            E = pd.Timestamp(row["report_date"]).normalize()
+            q = float(pd.to_numeric(row.get("qty"), errors="coerce") or 0.0)
+            row_days = int((E - S).days) + 1
+            if row_days <= 0:
+                continue
+            S2 = max(S, ms)
+            E2 = min(E, me)
+            if S2 > E2:
+                continue
+            days_m = int((E2 - S2).days) + 1
+            q_m = q * (days_m / float(row_days))
+            if days_m <= 0:
+                continue
+            for w_mon in _iso_mondays_intersecting(S2, E2):
+                w_sun = _iso_week_sunday(w_mon)
+                a = max(S2, w_mon)
+                b = min(E2, w_sun)
+                if a > b:
+                    continue
+                days_w = int((b - a).days) + 1
+                iso_qty[w_mon] = iso_qty.get(w_mon, 0.0) + q_m * (days_w / float(days_m))
+
+        w_raw = sum(iso_qty.values())
+        if w_raw > 1e-12:
+            scale = m_inc_f / w_raw
+            for w_mon in list(iso_qty.keys()):
+                iso_qty[w_mon] *= scale
+        elif abs(m_inc_f) > 1e-12:
+            mons = _iso_mondays_intersecting(ms, me)
+            if not mons:
+                w_mon = _iso_monday(ms)
+            else:
+                w_mon = mons[-1]
+            iso_qty[w_mon] = iso_qty.get(w_mon, 0.0) + m_inc_f
+
+        drop_ix.update(w_ix.tolist())
+        rk_all = _rk_series(d)
+        drop_ix.update(d.index[m_in_month & (rk_all == rk)].tolist())
+
+        if len(w_ix):
+            tmpl = d.loc[w_ix[0]].to_dict()
+        else:
+            m_one = d.loc[m_in_month & (rk_all == rk)]
+            tmpl = d.loc[m_one.index[0]].to_dict() if len(m_one) else d.iloc[0].to_dict()
+
+        for w_mon, qv in iso_qty.items():
+            if abs(float(qv)) < 1e-12:
+                continue
+            w_sun = _iso_week_sunday(w_mon)
+            seg_s = max(w_mon, ms)
+            seg_e = min(w_sun, me)
+            if seg_s > seg_e:
+                continue
+            nr = {**tmpl, **key_m}
+            nr["Start_date"] = seg_s
+            nr["report_date"] = seg_e
+            nr["qty_kind"] = "weekly"
+            nr["qty"] = float(qv)
+            nr["_iso_period"] = f"{w_mon:%Y-%m-%d}~{w_sun:%Y-%m-%d}"
+            for k in ("qty_cumulative_raw", "qty_incremental", "parent_period"):
+                if k in nr:
+                    nr[k] = pd.NA
+            new_rows.append(nr)
+
+    if not drop_ix and not new_rows:
+        return df
+
+    kept = d.drop(index=sorted(set(drop_ix)), errors="ignore")
+    if not new_rows:
+        out = kept
+    else:
+        added = pd.DataFrame(new_rows)
+        out = pd.concat([kept, added], axis=0, ignore_index=True)
+    return ensure_start_report_datetimes(out)
+
+
 def sales_df_for_calendar_month(
     df: pd.DataFrame,
     *,
@@ -428,9 +586,9 @@ def sales_df_for_calendar_month(
 ) -> pd.DataFrame:
     """
     依「曆月」做銷售檢視用資料列（會 copy）：
-    - monthly：只保留 report_date 落在 [month_start, month_end] 者，qty 不變。
-    - weekly：先 expand_weekly_cross_calendar_months（跨兩曆月且有該月 monthly 時用對帳拆段），
-      再只保留 report_date 落在 [month_start, month_end] 者。
+    - 先 expand_weekly_cross_calendar_months（跨曆月週拆段）。
+    - 列與 [month_start, month_end] **有交集**者保留（含 ISO 週跨月尾段）。
+    - 再 reconcile_iso_weeks_to_monthly_increment：該月有 monthly 增量時，依鍵改為 ISO 週列且加總＝增量。
     """
     if df is None or len(df) == 0:
         return df
@@ -444,12 +602,13 @@ def sales_df_for_calendar_month(
     d = ensure_start_report_datetimes(d).dropna(subset=["Start_date", "report_date"])
     if len(d) == 0:
         return d.iloc[0:0]
-    is_m = d["qty_kind"].map(is_monthly_kind)
+    sd = d["Start_date"].dt.normalize()
     rd = d["report_date"].dt.normalize()
-    sel = (rd >= ms) & (rd <= me)
+    sel = (sd <= me) & (rd >= ms)
     out = d.loc[sel].copy()
     if len(out) == 0:
         return d.iloc[0:0]
+    out = reconcile_iso_weeks_to_monthly_increment(out, month_start=ms, month_end=me)
     return out.sort_values(
         ["report_date", "customer", "brand", "EAN", "store"],
         kind="mergesort",
@@ -700,6 +859,11 @@ def report1_pivot(df: pd.DataFrame) -> pd.DataFrame:
         d.loc[has_parent, "_period"] = (
             d.loc[has_parent, "_period"].astype(str) + "（原：" + ps.loc[has_parent] + "）"
         )
+
+    if "_iso_period" in d.columns:
+        ips = d["_iso_period"].astype("string")
+        use_iso = (~is_m_row) & ips.notna() & ips.str.strip().ne("")
+        d.loc[use_iso, "_period"] = ips.loc[use_iso]
 
     p = pd.pivot_table(
         d,
