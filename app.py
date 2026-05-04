@@ -22,6 +22,32 @@ import verification as vf
 ADMIN_USER = "admin"
 
 
+def _unpack_load_sales_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list, list[str]]:
+    """相容舊版 persist_sales：load_state 可能只回傳 (sdf, mbl, dbg, batches) 四個值。"""
+    out = ps.load_state()
+    if not isinstance(out, tuple):
+        raise TypeError("load_state 必須回傳 tuple")
+    if len(out) == 5:
+        return out[0], out[1], out[2], out[3], list(out[4])
+    if len(out) == 4:
+        loader = getattr(ps, "load_closed_months", None)
+        cm = list(loader()) if callable(loader) else []
+        return out[0], out[1], out[2], out[3], cm
+    raise RuntimeError(f"load_state 回傳 {len(out)} 個值（預期 4 或 5）")
+
+
+def _save_sales_state(
+    batches: list,
+    closed_months: list[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """相容舊版 persist_sales：save_state 可能不支援 closed_months 參數。"""
+    cm = closed_months if closed_months is not None else []
+    try:
+        return ps.save_state(batches, closed_months=cm)  # type: ignore[call-arg]
+    except TypeError:
+        return ps.save_state(batches)
+
+
 def _upload_signature(f: object) -> str:
     fid = getattr(f, "file_id", None)
     if fid:
@@ -336,7 +362,7 @@ with tab_sales:
     f_sales = st.file_uploader("銷售資料（可多次上傳合併）", type=["xlsx", "xls"], key="sales")
 
     if "sales_state_initialized" not in st.session_state:
-        sdf, mbl, ldg, batches, cm = ps.load_state()
+        sdf, mbl, ldg, batches, cm = _unpack_load_sales_state()
         st.session_state.upload_batches = batches
         st.session_state.sales_df = sdf
         st.session_state.monthly_baseline = mbl
@@ -344,7 +370,8 @@ with tab_sales:
         st.session_state.closed_months = cm
         st.session_state.sales_state_initialized = True
     elif "closed_months" not in st.session_state:
-        st.session_state.closed_months = ps.load_closed_months()
+        _lcm = getattr(ps, "load_closed_months", None)
+        st.session_state.closed_months = list(_lcm()) if callable(_lcm) else []
 
     def _closed_month_set() -> set[str]:
         return set(st.session_state.get("closed_months") or [])
@@ -387,7 +414,7 @@ with tab_sales:
             try:
                 ncm = sorted(_closed_month_set() | {sel_close_m})
                 st.session_state.closed_months = ncm
-                sdf, mbl, ldg = ps.save_state(
+                sdf, mbl, ldg = _save_sales_state(
                     st.session_state.upload_batches,
                     closed_months=ncm,
                 )
@@ -424,7 +451,7 @@ with tab_sales:
                 try:
                     ncm = sorted(_closed_month_set() - set(to_open))
                     st.session_state.closed_months = ncm
-                    sdf, mbl, ldg = ps.save_state(
+                    sdf, mbl, ldg = _save_sales_state(
                         st.session_state.upload_batches,
                         closed_months=ncm,
                     )
@@ -455,7 +482,7 @@ with tab_sales:
                 nm = getattr(f_sales, "name", "") or ""
                 nb = ps.new_upload_batch(nm, raw)
                 nxt = [*st.session_state.upload_batches, nb]
-                sdf, mbl, ldg = ps.save_state(
+                sdf, mbl, ldg = _save_sales_state(
                     nxt, closed_months=st.session_state.get("closed_months", [])
                 )
                 st.session_state.upload_batches = nxt
@@ -496,7 +523,7 @@ with tab_sales:
                     disabled=batch_locked,
                 ):
                     nxt = [b for b in batches if b["id"] != sel_id]
-                    sdf, mbl, ldg = ps.save_state(
+                    sdf, mbl, ldg = _save_sales_state(
                         nxt, closed_months=st.session_state.get("closed_months", [])
                     )
                     st.session_state.upload_batches = nxt
@@ -525,7 +552,7 @@ with tab_sales:
                             nb = ps.new_upload_batch(getattr(fu_rep, "name", "") or "", raw)
                             nb_list = list(batches)
                             nb_list[ix] = nb
-                            sdf, mbl, ldg = ps.save_state(
+                            sdf, mbl, ldg = _save_sales_state(
                                 nb_list,
                                 closed_months=st.session_state.get("closed_months", []),
                             )
@@ -578,7 +605,7 @@ with tab_sales:
                                 getattr(up_bl, "name", "") or "", bl
                             ),
                         ]
-                        sdf, mbl, ldg = ps.save_state(
+                        sdf, mbl, ldg = _save_sales_state(
                             nxt, closed_months=st.session_state.get("closed_months", [])
                         )
                         st.session_state.upload_batches = nxt
