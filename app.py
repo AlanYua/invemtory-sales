@@ -44,8 +44,8 @@ def _style_numbers_pos_red_neg_green(
 st.set_page_config(page_title="庫存銷售差異", layout="wide")
 st.title("庫存／銷售 雙檔比對")
 st.caption(
-    "兩份 Excel 需能對應到 **條碼／門市／庫存／銷售**（可接受常見欄名別名）。"
-    " 以 (條碼, 門市) 合併；差異 = **系統 − 客戶**。同檔內重複列會先加總。"
+    "兩份 Excel 需能對應到 **客戶／條碼／門市／庫存／銷售**（可接受常見欄名別名）。"
+    " 以 (客戶, 條碼, 門市) 合併；差異 = **系統 − 客戶**。同檔內重複列會先加總。"
 )
 
 s1, s2 = st.columns(2)
@@ -69,7 +69,7 @@ try:
     cust_df = vf.load_simple_inventory_sales(raw_c)
 
     if len(sys_df) == 0 or len(cust_df) == 0:
-        st.warning("其中一份檔案沒有有效資料列（需有 條碼+門市）。")
+        st.warning("其中一份檔案沒有有效資料列（需有 客戶+條碼+門市）。")
         st.stop()
 
     rep_full = vf.compute_simple_diff_report(system_df=sys_df, customer_df=cust_df)
