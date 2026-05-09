@@ -1,122 +1,18 @@
 from __future__ import annotations
 
-import hashlib
 import io
-import os
 import sys
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# 強制優先載入本專案同層模組，避免誤載 site-packages 的同名套件
 _BASE_DIR = Path(__file__).resolve().parent
 _base_dir_str = str(_BASE_DIR)
 if _base_dir_str not in sys.path:
     sys.path.insert(0, _base_dir_str)
 
-import persist_sales as ps
-import sales_reports as sr
 import verification as vf
-
-ADMIN_USER = "admin"
-
-
-def _unpack_load_sales_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list, list[str]]:
-    """相容舊版 persist_sales：load_state 可能只回傳 (sdf, mbl, dbg, batches) 四個值。"""
-    out = ps.load_state()
-    if not isinstance(out, tuple):
-        raise TypeError("load_state 必須回傳 tuple")
-    if len(out) == 5:
-        return out[0], out[1], out[2], out[3], list(out[4])
-    if len(out) == 4:
-        loader = getattr(ps, "load_closed_months", None)
-        cm = list(loader()) if callable(loader) else []
-        return out[0], out[1], out[2], out[3], cm
-    raise RuntimeError(f"load_state 回傳 {len(out)} 個值（預期 4 或 5）")
-
-
-def _save_sales_state(
-    batches: list,
-    closed_months: list[str] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """相容舊版 persist_sales：save_state 可能不支援 closed_months 參數。"""
-    cm = closed_months if closed_months is not None else []
-    try:
-        return ps.save_state(batches, closed_months=cm)  # type: ignore[call-arg]
-    except TypeError:
-        return ps.save_state(batches)
-
-
-def _upload_signature(f: object) -> str:
-    fid = getattr(f, "file_id", None)
-    if fid:
-        return f"id:{fid}"
-    name = (getattr(f, "name", None) or "").encode()
-    gv = getattr(f, "getvalue", None)
-    if callable(gv):
-        data = gv()
-    else:
-        try:
-            f.seek(0)
-        except Exception:
-            pass
-        data = f.read()
-        try:
-            f.seek(0)
-        except Exception:
-            pass
-    return "h:" + hashlib.sha256(name + data).hexdigest()
-
-
-def _admin_password() -> str:
-    p = os.getenv("ADMIN_PASSWORD", "").strip()
-    if p:
-        return p
-    try:
-        return str(st.secrets.get("ADMIN_PASSWORD", "")).strip()
-    except Exception:
-        return ""
-
-
-def _pivot_for_display(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    if df is None or len(df) == 0:
-        return df, {}
-
-    def _label(col: object) -> str:
-        if isinstance(col, tuple):
-            parts = [str(x).strip() for x in col if str(x).strip() not in ("", "None", "<NA>")]
-            if len(parts) >= 2 and parts[0] in {"Weekly", "Monthly"}:
-                # 隱藏 Weekly/Monthly，但仍需讓欄位保持可區分（避免同 customer 變成重複欄名）
-                # 用不可見字元做 disambiguation：畫面看起來一樣，但字串不同。
-                invis = "\u200b" if parts[0] == "Weekly" else "\u200b\u200b"
-                return f"{parts[1]}{invis}"
-            return " — ".join(parts) if parts else "欄"
-        return str(col)
-
-    out = df.reset_index()
-    if isinstance(out.columns, pd.MultiIndex):
-        out.columns = [_label(c) for c in out.columns]
-    else:
-        out.columns = [_label(c) for c in out.columns]
-
-    seen: dict[str, int] = {}
-    deduped: list[str] = []
-    for c in out.columns:
-        lab = str(c)
-        if lab not in seen:
-            seen[lab] = 0
-            deduped.append(lab)
-        else:
-            seen[lab] += 1
-            deduped.append(f"{lab} ({seen[lab]})")
-    out.columns = deduped
-
-    cfg: dict = {}
-    for c in out.columns:
-        if pd.api.types.is_numeric_dtype(out[c]):
-            cfg[c] = st.column_config.NumberColumn(str(c), format="%,.0f")
-    return out, cfg
 
 
 def _style_numbers_pos_red_neg_green(
@@ -125,8 +21,8 @@ def _style_numbers_pos_red_neg_green(
     if df is None or len(df) == 0:
         return df
     try:
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not num_cols:
+        diff_cols = [c for c in ("庫存差異", "銷售差異") if c in df.columns]
+        if not diff_cols:
             return df
 
         def _cell(v: object) -> str:
@@ -135,633 +31,74 @@ def _style_numbers_pos_red_neg_green(
             except Exception:
                 return ""
             if x > 0:
-                return "color: #ff4d4f;"  # red
+                return "color: #ff4d4f;"
             if x < 0:
-                return "color: #52c41a;"  # green
+                return "color: #52c41a;"
             return ""
 
-        # 顯示用：避免 1.0000000 這種浮點尾數（查驗數量通常是整數）
-        return df.style.format("{:,.0f}", subset=num_cols).map(_cell, subset=num_cols)
+        return df.style.format("{:,.0f}", subset=diff_cols).map(_cell, subset=diff_cols)
     except Exception:
         return df
 
 
-def _style_report1_week_subtotals(df: pd.DataFrame) -> "pd.io.formats.style.Styler | pd.DataFrame":
-    """
-    Streamlit 的 dataframe 有時會把「小計/合計」那列看起來像被淡化。
-    這裡主動把週小計列做成更清楚的視覺樣式（避免「反灰像被 disabled」的觀感）。
-    """
-    if df is None or len(df) == 0:
-        return df
-    try:
-        base = _style_numbers_pos_red_neg_green(df)
-        styler = base if hasattr(base, "apply") else df.style
+st.set_page_config(page_title="庫存銷售差異", layout="wide")
+st.title("庫存／銷售 雙檔比對")
+st.caption(
+    "兩份 Excel 需能對應到 **條碼／門市／庫存／銷售**（可接受常見欄名別名）。"
+    " 以 (條碼, 門市) 合併；差異 = **系統 − 客戶**。同檔內重複列會先加總。"
+)
 
-        sub = str(getattr(sr, "REPORT1_PERIOD_SUB", "（週小計）"))
-        margin_row = str(getattr(sr, "MARGIN_ROW", "欄合計"))
-        labels = {sub, "（整月加總）", margin_row}
+s1, s2 = st.columns(2)
+with s1:
+    st.caption("系統（基準）")
+    sys_file = st.file_uploader("系統檔", type=["xlsx", "xls"], key="sys")
+with s2:
+    st.caption("客戶")
+    cust_file = st.file_uploader("客戶檔", type=["xlsx", "xls"], key="cust")
 
-        obj_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
-        if not obj_cols:
-            return styler
-        flag = df[obj_cols].astype(str).isin(labels).any(axis=1)
+only_diff = st.checkbox("僅顯示庫存或銷售有差異的列", value=True)
 
-        def _row_style(row: pd.Series) -> list[str]:
-            if not bool(flag.loc[row.name]):
-                return [""] * len(row)
-            return ["font-weight: 700; background-color: rgba(160,160,160,0.18)"] * len(row)
-
-        return styler.apply(_row_style, axis=1)
-    except Exception:
-        return df
-
-
-st.set_page_config(page_title="庫存查驗 / 銷售統計", layout="wide")
-
-if not st.session_state.get("auth_ok"):
-    st.title("登入")
-    cfg_pw = _admin_password()
-    if not cfg_pw:
-        st.error("未設定密碼。")
-        st.stop()
-    with st.form("login"):
-        u = st.text_input("帳號", value=ADMIN_USER)
-        pw = st.text_input("密碼", type="password")
-        ok = st.form_submit_button("登入")
-    if ok:
-        if u.strip() == ADMIN_USER and pw == cfg_pw:
-            st.session_state.auth_ok = True
-            st.rerun()
-        st.error("帳號或密碼錯誤")
+if sys_file is None or cust_file is None:
+    st.info("請上傳 **系統檔** 與 **客戶檔** 各一份。")
     st.stop()
 
-with st.sidebar:
-    if st.button("登出"):
-        st.session_state.auth_ok = False
-        st.rerun()
-    st.caption("月結案／解除：「2. 銷售統計」→ 月結案、月結案管理")
+try:
+    raw_s = pd.read_excel(sys_file)
+    raw_c = pd.read_excel(cust_file)
+    sys_df = vf.load_simple_inventory_sales(raw_s)
+    cust_df = vf.load_simple_inventory_sales(raw_c)
 
-st.title("庫存查驗 / 銷售統計")
+    if len(sys_df) == 0 or len(cust_df) == 0:
+        st.warning("其中一份檔案沒有有效資料列（需有 條碼+門市）。")
+        st.stop()
 
-tab_verify, tab_sales = st.tabs(["1. 查驗", "2. 銷售統計"])
-
-with tab_verify:
-    # 重新查驗：清掉查驗相關 widget/state，允許同檔案重新上傳並重跑
-    if "verify_reset_seq" not in st.session_state:
-        st.session_state.verify_reset_seq = 0
-    if st.button("重新查驗（清除查驗上傳/選項）", key="btn_verify_reset"):
-        for k in [
-            "cust",
-            "sys",
-            "verify_in",
-            "verify_ret",
-            "verify_sales_override",
-            "verify_sales_month_sel",
-            "verify_sales_day",
-            "_verify_prev_month_sel",
-        ]:
-            st.session_state.pop(k, None)
-        st.session_state.verify_reset_seq += 1
-        st.rerun()
-
-    # 新版查驗：先選客戶（用來撈該客戶當月累計銷售）
-    sdf = st.session_state.get("sales_df")
-    cust_opts: list[str] = []
-    months: list[str] = []
-    if isinstance(sdf, pd.DataFrame) and len(sdf):
-        if "customer" in sdf.columns:
-            cust_opts = sorted(sdf["customer"].astype(str).str.strip().unique().tolist())
-        if "report_date" in sdf.columns:
-            _rd = pd.to_datetime(sdf["report_date"], errors="coerce").dropna()
-            if len(_rd):
-                months = sorted(_rd.dt.strftime("%Y/%m").unique().tolist())
-    if not months:
-        months = [pd.Timestamp.today().strftime("%Y/%m")]
-
-    c0, c1 = st.columns([2, 1])
-    with c0:
-        # 客戶來源通常來自銷售統計（sales_df）。但查驗流程希望「先選客戶再上傳檔案」，
-        # 因此：有清單就提供下拉；沒有清單就直接手動輸入（不再用 checkbox 讓 UI 看起來像不能選）。
-        if cust_opts:
-            mode = st.selectbox(
-                "查驗客戶（先選，因為要撈該客戶當月累計銷售）",
-                options=["（手動輸入）"] + cust_opts,
-                index=0,
-                key="verify_customer_mode",
-            )
-            if mode == "（手動輸入）":
-                customer_sel = st.text_input(
-                    "手動輸入客戶",
-                    key="verify_customer_sel_text",
-                ).strip()
-            else:
-                customer_sel = str(mode).strip()
-        else:
-            customer_sel = st.text_input(
-                "查驗客戶（用來撈該客戶當月累計銷售）",
-                key="verify_customer_sel_text",
-            ).strip()
-
-        # sales_df 若存在且有需要欄位，就用來算「當月累計銷售」；否則查驗仍可做，sales 視為 0
-        sales_ready = (
-            isinstance(sdf, pd.DataFrame)
-            and len(sdf)
-            and all(x in sdf.columns for x in ["customer", "EAN", "qty", "report_date"])
-        )
-        sales_ready_for_customer = False
-        if sales_ready and customer_sel:
-            cust_set = set(sdf["customer"].astype(str).str.strip().unique().tolist())  # type: ignore[union-attr]
-            sales_ready_for_customer = customer_sel.strip() in cust_set
-            if not sales_ready_for_customer:
-                st.warning("銷售統計找不到此客戶：『當月累計銷售』將以 0 計。")
-        elif not sales_ready:
-            st.info("找不到可用的入庫銷售明細（或缺欄位）。查驗仍可進行，但『當月累計銷售』會以 0 計。")
-        elif not customer_sel:
-            st.warning("請先填寫/選擇客戶（用來帶入當月累計銷售）。")
-    with c1:
-        month_sel = st.selectbox(
-            "查驗月份（YYYY/MM）",
-            options=months,
-            index=len(months) - 1,
-            key="verify_v2_month_sel",
-        )
-
-    month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
-    month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
-    st.caption(f"當月累計銷售區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}")
-
-    st.subheader("上傳檔案（欄位統一：EAN／品名／類型／數量）")
-    s1, s2 = st.columns(2)
-    with s1:
-        st.caption("凌越（系統）")
-        sys_mix = st.file_uploader(
-            "系統檔（混合進/退/庫，用類型欄判斷）",
-            type=["xlsx", "xls"],
-            key=f"verify_sys_mix_{st.session_state.verify_reset_seq}",
-        )
-    with s2:
-        st.caption("客戶")
-        cust_mix = st.file_uploader(
-            "客戶檔（混合進/退/庫，用類型欄判斷）",
-            type=["xlsx", "xls"],
-            key=f"verify_cust_mix_{st.session_state.verify_reset_seq}",
-        )
-
-    def _read_v2(fu: object | None, forced_type: str | None) -> pd.DataFrame:
-        if fu is None:
-            return pd.DataFrame(columns=vf.VERIFY_V2_COLS)
-        raw = pd.read_excel(fu)
-        return vf.load_verify_v2(raw, forced_type=forced_type)
-
-    try:
-        sys_parts = [
-            _read_v2(sys_mix, None),
-        ]
-        cust_parts = [
-            _read_v2(cust_mix, None),
-        ]
-        sys_df_v2 = pd.concat([x for x in sys_parts if len(x)], ignore_index=True) if any(len(x) for x in sys_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
-        cust_df_v2 = pd.concat([x for x in cust_parts if len(x)], ignore_index=True) if any(len(x) for x in cust_parts) else pd.DataFrame(columns=vf.VERIFY_V2_COLS)
-
-        if len(sys_df_v2) == 0 or len(cust_df_v2) == 0:
-            st.info("請至少各上傳一份：系統檔與客戶檔（可用『混合檔』或分檔）。")
-            raise RuntimeError("查驗檔案不足")
-
-        rep = vf.compute_verify_v2_report(
-            system_df=sys_df_v2,
-            customer_df=cust_df_v2,
-            sales_df=sdf if sales_ready_for_customer else None,
-            customer=customer_sel,
-            report_date_from=month_start,
-            report_date_to=month_end,
-        )
-
-        st.subheader("查驗報表")
-        st.dataframe(
-            _style_numbers_pos_red_neg_green(rep),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as w:
-            rep.to_excel(w, sheet_name="verify_v2", index=False)
-        buf.seek(0)
-        st.download_button(
-            "下載查驗報表 Excel",
-            data=buf.getvalue(),
-            file_name="verify_v2.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except Exception as e:
-        st.error(str(e))
-
-with tab_sales:
-    if not ps.supabase_configured():
-        st.error("未設定 Supabase。")
-    f_sales = st.file_uploader("銷售資料（可多次上傳合併）", type=["xlsx", "xls"], key="sales")
-
-    if "sales_state_initialized" not in st.session_state:
-        sdf, mbl, ldg, batches, cm = _unpack_load_sales_state()
-        st.session_state.upload_batches = batches
-        st.session_state.sales_df = sdf
-        st.session_state.monthly_baseline = mbl
-        st.session_state.last_monthly_debug = ldg
-        st.session_state.closed_months = cm
-        st.session_state.sales_state_initialized = True
-    elif "closed_months" not in st.session_state:
-        _lcm = getattr(ps, "load_closed_months", None)
-        st.session_state.closed_months = list(_lcm()) if callable(_lcm) else []
-
-    def _closed_month_set() -> set[str]:
-        return set(st.session_state.get("closed_months") or [])
-
-    with st.expander("月結案", expanded=False):
-        st.caption(
-            "結案後：該曆月不可再上傳新資料；含該月之批次不可刪除、不可取代。"
-        )
-        cm_cur = sorted(_closed_month_set())
-        if cm_cur:
-            st.info("已結案月份：" + "、".join(cm_cur))
-        else:
-            st.caption("目前尚無已結案月份。")
-        df_all_mc = st.session_state.get("sales_df")
-        opts_mc: list[str] = []
-        if isinstance(df_all_mc, pd.DataFrame) and len(df_all_mc):
-            dmc = sr.ensure_start_report_datetimes(df_all_mc)
-            r1 = pd.to_datetime(dmc["report_date"], errors="coerce").dropna()
-            s1 = pd.to_datetime(dmc["Start_date"], errors="coerce").dropna()
-            opts_mc = sorted(
-                set(r1.dt.strftime("%Y/%m").unique().tolist())
-                | set(s1.dt.strftime("%Y/%m").unique().tolist())
-            )
-        if not opts_mc:
-            opts_mc = [pd.Timestamp.today().strftime("%Y/%m")]
-        ix_mc = st.selectbox(
-            "選擇要結案的月份（YYYY/MM）",
-            range(len(opts_mc)),
-            format_func=lambda i: opts_mc[i],
-            key="month_close_pick",
-        )
-        sel_close_m = opts_mc[ix_mc]
-        already = sel_close_m in _closed_month_set()
-        if st.button(
-            "月結案",
-            key="btn_month_close",
-            disabled=not ps.supabase_configured() or already,
-            help=None if ps.supabase_configured() else "需設定 Supabase 才能寫入結案狀態",
-        ):
-            try:
-                ncm = sorted(_closed_month_set() | {sel_close_m})
-                st.session_state.closed_months = ncm
-                sdf, mbl, ldg = _save_sales_state(
-                    st.session_state.upload_batches,
-                    closed_months=ncm,
-                )
-                st.session_state.sales_df = sdf
-                st.session_state.monthly_baseline = mbl
-                st.session_state.last_monthly_debug = ldg
-                st.success(f"已結案：{sel_close_m}（此後不可再上傳或刪改該月相關批次）")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-        if already:
-            st.caption(f"「{sel_close_m}」已結案。")
-
-    with st.expander("月結案管理", expanded=False):
-        st.caption(
-            "取消結案後，該曆月可再上傳／可刪除或取代含該月之批次。僅限已登入管理員操作。"
-        )
-        cm_list = sorted(_closed_month_set())
-        if not cm_list:
-            st.caption("目前無已結案月份。")
-        else:
-            to_open = st.multiselect(
-                "選擇要解除結案的月份（可多選）",
-                options=cm_list,
-                default=[],
-                key="month_reopen_pick",
-            )
-            if st.button(
-                "取消結案並寫入雲端",
-                key="btn_month_reopen",
-                disabled=not ps.supabase_configured() or len(to_open) == 0,
-                help=None if ps.supabase_configured() else "需設定 Supabase",
-            ):
-                try:
-                    ncm = sorted(_closed_month_set() - set(to_open))
-                    st.session_state.closed_months = ncm
-                    sdf, mbl, ldg = _save_sales_state(
-                        st.session_state.upload_batches,
-                        closed_months=ncm,
-                    )
-                    st.session_state.sales_df = sdf
-                    st.session_state.monthly_baseline = mbl
-                    st.session_state.last_monthly_debug = ldg
-                    st.success(
-                        "已解除結案：" + "、".join(to_open) + "；其餘已結案："
-                        + ("、".join(ncm) if ncm else "（無）")
-                    )
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
-
-    if not f_sales:
-        st.session_state.pop("_sales_ingested_sig", None)
+    rep_full = vf.compute_simple_diff_report(system_df=sys_df, customer_df=cust_df)
+    if only_diff:
+        rep = rep_full[
+            (rep_full["庫存差異"].abs() > 1e-9) | (rep_full["銷售差異"].abs() > 1e-9)
+        ].reset_index(drop=True)
     else:
-        u_sig = _upload_signature(f_sales)
-        if st.session_state.get("_sales_ingested_sig") != u_sig:
-            try:
-                f_sales.seek(0)
-                raw = pd.read_excel(f_sales)
-                raw = sr.load_sales(raw)
-                if ps.df_intersects_month_strings(raw, _closed_month_set()):
-                    raise ValueError(
-                        "此檔含「已結案」月份之資料，無法上傳。請移除該月列或先不要結案該月。"
-                    )
-                nm = getattr(f_sales, "name", "") or ""
-                nb = ps.new_upload_batch(nm, raw)
-                nxt = [*st.session_state.upload_batches, nb]
-                sdf, mbl, ldg = _save_sales_state(
-                    nxt, closed_months=st.session_state.get("closed_months", [])
-                )
-                st.session_state.upload_batches = nxt
-                st.session_state.sales_df = sdf
-                st.session_state.monthly_baseline = mbl
-                st.session_state.last_monthly_debug = ldg
-                st.session_state["_sales_ingested_sig"] = u_sig
-                st.success(f"已入庫：{nm}（{len(raw)} 列）")
-            except Exception as e:
-                st.error(str(e))
+        rep = rep_full
 
-    with st.expander("上傳批次與修正", expanded=False):
-        batches = st.session_state.upload_batches
-        st.dataframe(ps.batch_summary_rows(batches), use_container_width=True)
-        if batches:
-            labels = [
-                f"{i + 1}. {b.get('filename', '')}  [{str(b.get('id', ''))[:8]}…]"
-                for i, b in enumerate(batches)
-            ]
-            ix = st.selectbox("選擇要處理的批次", range(len(labels)), format_func=lambda j: labels[j])
-            sel_id = batches[ix]["id"]
-            sel_kind = batches[ix].get("kind") or "upload"
-            batch_locked = ps.batch_intersects_closed_months(
-                batches[ix], _closed_month_set()
-            )
-            if batch_locked:
-                st.warning("此批次含已結案月份資料，不可刪除或取代。")
-            fu_rep = st.file_uploader(
-                "取代用 Excel",
-                type=["xlsx", "xls"],
-                key="sales_replace_file",
-            )
-            c_rm, c_rp = st.columns(2)
-            with c_rm:
-                if st.button(
-                    "移除此批次並重算",
-                    key="batch_remove",
-                    disabled=batch_locked,
-                ):
-                    nxt = [b for b in batches if b["id"] != sel_id]
-                    sdf, mbl, ldg = _save_sales_state(
-                        nxt, closed_months=st.session_state.get("closed_months", [])
-                    )
-                    st.session_state.upload_batches = nxt
-                    st.session_state.sales_df = sdf
-                    st.session_state.monthly_baseline = mbl
-                    st.session_state.last_monthly_debug = ldg
-                    st.success("已移除。")
-                    st.rerun()
-            with c_rp:
-                if st.button(
-                    "用新檔取代此批次",
-                    key="batch_replace",
-                    disabled=batch_locked,
-                ):
-                    if sel_kind == "baseline_override":
-                        st.warning("baseline 批次請先移除。")
-                    elif fu_rep is None:
-                        st.warning("未選檔案。")
-                    else:
-                        try:
-                            raw = sr.load_sales(pd.read_excel(fu_rep))
-                            if ps.df_intersects_month_strings(raw, _closed_month_set()):
-                                raise ValueError(
-                                    "新檔含已結案月份，無法取代此批次。"
-                                )
-                            nb = ps.new_upload_batch(getattr(fu_rep, "name", "") or "", raw)
-                            nb_list = list(batches)
-                            nb_list[ix] = nb
-                            sdf, mbl, ldg = _save_sales_state(
-                                nb_list,
-                                closed_months=st.session_state.get("closed_months", []),
-                            )
-                            st.session_state.upload_batches = nb_list
-                            st.session_state.sales_df = sdf
-                            st.session_state.monthly_baseline = mbl
-                            st.session_state.last_monthly_debug = ldg
-                            st.success("已取代。")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
+    st.subheader("差異報表" + ("（僅有差異）" if only_diff else "（全部鍵）"))
+    st.caption(f"列數：{len(rep):,}（全部合併列數 {len(rep_full):,}）")
+    st.dataframe(
+        _style_numbers_pos_red_neg_green(rep),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    df_all = st.session_state.sales_df
-
-    with st.expander("Monthly baseline", expanded=False):
-        bdf = st.session_state.monthly_baseline
-        if len(bdf):
-            st.dataframe(bdf, use_container_width=True)
-        b1, b2 = st.columns(2)
-        with b1:
-            st.download_button(
-                "下載 baseline Excel",
-                data=sr.to_excel_bytes({"monthly_baseline": bdf}),
-                file_name="monthly_baseline.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_bl",
-            )
-        with b2:
-            up_bl = st.file_uploader(
-                "覆蓋 baseline（Excel）",
-                type=["xlsx", "xls"],
-                key="up_bl",
-            )
-            if not up_bl:
-                st.session_state.pop("_bl_up_ingested_sig", None)
-            else:
-                bl_sig = _upload_signature(up_bl)
-                if st.session_state.get("_bl_up_ingested_sig") != bl_sig:
-                    try:
-                        if hasattr(up_bl, "seek"):
-                            up_bl.seek(0)
-                        bl = sr.load_monthly_baseline(pd.read_excel(up_bl))
-                        if ps.df_intersects_month_strings(bl, _closed_month_set()):
-                            raise ValueError(
-                                "baseline 含已結案月份，無法覆寫。"
-                            )
-                        nxt = [
-                            *st.session_state.upload_batches,
-                            ps.new_baseline_override_batch(
-                                getattr(up_bl, "name", "") or "", bl
-                            ),
-                        ]
-                        sdf, mbl, ldg = _save_sales_state(
-                            nxt, closed_months=st.session_state.get("closed_months", [])
-                        )
-                        st.session_state.upload_batches = nxt
-                        st.session_state.sales_df = sdf
-                        st.session_state.monthly_baseline = mbl
-                        st.session_state.last_monthly_debug = ldg
-                        st.session_state["_bl_up_ingested_sig"] = bl_sig
-                        st.success("baseline 已更新。")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-
-    if len(df_all) == 0:
-        pass
-    else:
-        use_raw = st.radio(
-            "qty 口徑",
-            options=[False, True],
-            format_func=lambda x: "區間量" if not x else "累積原值",
-            horizontal=True,
-            key="pivot_qty_mode",
-        )
-        df_view = sr.dataframe_for_pivots(df_all, use_cumulative_raw=use_raw)
-
-        if len(st.session_state.last_monthly_debug):
-            with st.expander("monthly 明細", expanded=False):
-                st.dataframe(st.session_state.last_monthly_debug, use_container_width=True)
-
-        qsum = float(df_view["qty"].sum())
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("總銷量 qty", f"{qsum:,.0f}")
-        m2.metric("明細列數", f"{len(df_view):,}")
-        m3.metric("品牌數", f"{df_view['brand'].nunique():,}")
-        m4.metric("客戶數", f"{df_view['customer'].nunique():,}")
-
-        st.subheader("報表查詢")
-        dv = sr.ensure_start_report_datetimes(df_view)
-
-        # 以 report_date 做「整月」查詢；另外提供單一銷售日僅用於顯示週別（不影響查詢範圍）
-        rdc = (
-            dv["report_date"].dropna()
-            if len(dv) and "report_date" in dv.columns
-            else pd.Series([], dtype="datetime64[ns]")
-        )
-        months: list[str] = []
-        if len(rdc):
-            months = sorted(pd.to_datetime(rdc, errors="coerce").dropna().dt.strftime("%Y/%m").unique().tolist())
-        if not months:
-            months = [pd.Timestamp.today().strftime("%Y/%m")]
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            month_sel = st.selectbox(
-                "銷售月份（YYYY/MM）",
-                options=months,
-                index=len(months) - 1,
-                key="q_sales_month_sel",
-            )
-
-        month_start = pd.to_datetime(month_sel + "/01", errors="coerce").normalize()
-        month_end = (month_start + pd.offsets.MonthEnd(1)).normalize()
-
-        prev_month_sel = st.session_state.get("_q_prev_month_sel")
-        if prev_month_sel != month_sel:
-            st.session_state["q_sales_day"] = month_start.date()
-            st.session_state["_q_prev_month_sel"] = month_sel
-        else:
-            cur_day = st.session_state.get("q_sales_day")
-            if cur_day:
-                _d = pd.Timestamp(cur_day).normalize()
-                if _d < month_start or _d > month_end:
-                    st.session_state["q_sales_day"] = month_start.date()
-
-        with c2:
-            sales_day = st.date_input(
-                "銷售日（看屬於哪週）",
-                value=month_start.date(),
-                min_value=month_start.date(),
-                max_value=month_end.date(),
-                key="q_sales_day",
-            )
-
-        try:
-            wk_s, wk_e = sr.week_range_monday_sunday(pd.Timestamp(sales_day))
-        except Exception:
-            wk_s, wk_e = month_start, month_start + pd.Timedelta(days=6)
-
-        with c3:
-            st.caption(
-                f"查詢區間：{month_start:%Y-%m-%d}~{month_end:%Y-%m-%d}（monthly 依 report_date；"
-                f"weekly 跨兩曆月：有同月 monthly 時首段＝該月 monthly 加總−同鍵較早 weekly，尾段＝週總−首段；否則依天數比例）｜"
-                f"所選銷售日 ISO 週：{wk_s:%Y-%m-%d}~{wk_e:%Y-%m-%d}"
-            )
-
-        df_base = sr.sales_df_for_calendar_month(
-            dv,
-            month_start=month_start,
-            month_end=month_end,
-        )
-
-        all_brands = sorted(df_view["brand"].dropna().astype(str).str.strip().unique())
-        all_customers = sorted(df_view["customer"].dropna().astype(str).str.strip().unique())
-        br12 = st.multiselect("品牌（1、2）", all_brands, default=[], key="br12")
-        df_r12 = sr.filter_brands(df_base, br12 or None)
-        br3 = st.multiselect("品牌（3）", all_brands, default=[], key="br3")
-        cu3 = st.multiselect("Customer（3）", all_customers, default=[], key="cu3")
-        df_r3 = sr.filter_customers(sr.filter_brands(df_base, br3 or None), cu3 or None)
-
-        r1 = sr.report1_pivot(df_r12)
-        r2 = sr.report2_pivot(df_r12)
-        r3 = sr.report3_pivot(df_r3)
-
-        tab_r1, tab_r2, tab_r3, tab_dl = st.tabs(
-            ["報表 1", "報表 2", "報表 3", "匯出 xlsx"]
-        )
-
-        with tab_r1:
-            d1, c1 = _pivot_for_display(r1)
-            st.dataframe(
-                _style_report1_week_subtotals(d1),
-                use_container_width=True,
-                column_config=c1,
-                hide_index=True,
-            )
-
-        with tab_r2:
-            d2, c2 = _pivot_for_display(r2)
-            st.dataframe(
-                _style_report1_week_subtotals(d2),
-                use_container_width=True,
-                column_config=c2,
-                hide_index=True,
-            )
-
-        with tab_r3:
-            d3, c3 = _pivot_for_display(r3)
-            st.dataframe(
-                _style_report1_week_subtotals(d3),
-                use_container_width=True,
-                column_config=c3,
-                hide_index=True,
-            )
-
-        with tab_dl:
-            xl = sr.to_excel_bytes(
-                {
-                    "report1": r1.reset_index(),
-                    "report2": r2.reset_index(),
-                    "report3": r3.reset_index(),
-                    "monthly_baseline": st.session_state.monthly_baseline,
-                    "last_upload_monthly_debug": st.session_state.last_monthly_debug,
-                }
-            )
-            st.download_button(
-                "下載報表 1～3（同一個 xlsx 多 sheet）",
-                data=xl,
-                file_name="sales_reports.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        rep.to_excel(w, sheet_name="差異", index=False)
+        if only_diff and len(rep) != len(rep_full):
+            rep_full.to_excel(w, sheet_name="完整合併", index=False)
+    buf.seek(0)
+    st.download_button(
+        "下載 Excel",
+        data=buf.getvalue(),
+        file_name="庫存銷售差異.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+except Exception as e:
+    st.error(str(e))
