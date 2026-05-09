@@ -21,8 +21,8 @@ def _style_numbers_pos_red_neg_green(
     if df is None or len(df) == 0:
         return df
     try:
-        diff_cols = [c for c in ("庫存差異", "銷售差異") if c in df.columns]
-        if not diff_cols:
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if not num_cols:
             return df
 
         def _cell(v: object) -> str:
@@ -36,7 +36,11 @@ def _style_numbers_pos_red_neg_green(
                 return "color: #52c41a;"
             return ""
 
-        return df.style.format("{:,.0f}", subset=diff_cols).map(_cell, subset=diff_cols)
+        diff_cols = [c for c in ("庫存差異", "銷售差異") if c in df.columns]
+        sty = df.style.format("{:,.0f}", subset=num_cols)
+        if diff_cols:
+            sty = sty.map(_cell, subset=diff_cols)
+        return sty
     except Exception:
         return df
 
@@ -45,16 +49,16 @@ st.set_page_config(page_title="庫存銷售差異", layout="wide")
 st.title("庫存／銷售 雙檔比對")
 st.caption(
     "兩份 Excel 需能對應到 **客戶／條碼／門市／庫存／銷售**（可接受常見欄名別名）。"
-    " 以 (客戶, 條碼, 門市) 合併；差異 = **系統 − 客戶**。同檔內重複列會先加總。"
+    " 以 (客戶, 條碼, 門市) 合併；差異 = **檔案1 − 檔案2**。同檔內重複列會先加總。"
 )
 
 s1, s2 = st.columns(2)
 with s1:
-    st.caption("系統（基準）")
-    sys_file = st.file_uploader("系統檔", type=["xlsx", "xls"], key="sys")
+    st.caption("檔案 1（基準）")
+    sys_file = st.file_uploader("檔案 1", type=["xlsx", "xls"], key="sys")
 with s2:
-    st.caption("客戶")
-    cust_file = st.file_uploader("客戶檔", type=["xlsx", "xls"], key="cust")
+    st.caption("檔案 2（比較）")
+    cust_file = st.file_uploader("檔案 2", type=["xlsx", "xls"], key="cust")
 
 only_diff = st.checkbox("僅顯示庫存或銷售有差異的列", value=True)
 
@@ -72,7 +76,7 @@ try:
         st.warning("其中一份檔案沒有有效資料列（需有 客戶+條碼+門市）。")
         st.stop()
 
-    rep_full = vf.compute_simple_diff_report(system_df=sys_df, customer_df=cust_df)
+    rep_full = vf.compute_simple_diff_report(file1_df=sys_df, file2_df=cust_df)
     if only_diff:
         rep = rep_full[
             (rep_full["庫存差異"].abs() > 1e-9) | (rep_full["銷售差異"].abs() > 1e-9)

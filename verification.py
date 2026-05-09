@@ -1,4 +1,4 @@
-"""雙檔比對：客戶／條碼／門市／庫存／銷售。差異 = 系統 − 客戶。"""
+"""雙檔比對：客戶／條碼／門市／庫存／銷售。差異 = 檔案1 − 檔案2。"""
 from __future__ import annotations
 
 import pandas as pd
@@ -14,6 +14,15 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _coerce_qty(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
+
+def _to_int_series(s: pd.Series) -> pd.Series:
+    """
+    將數值欄轉成整數（nullable Int64），避免輸出/Excel 顯示 0.0000。
+    若遇到非整數浮點（例如 1.5），會先四捨五入到最接近的整數。
+    """
+    x = pd.to_numeric(s, errors="coerce").fillna(0)
+    x = x.round(0)
+    return x.astype("Int64")
 
 
 def _pick_col(d: pd.DataFrame, want: list[str], alts: list[str]) -> str | None:
@@ -82,35 +91,39 @@ def aggregate_simple_inventory_sales(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_simple_diff_report(
-    system_df: pd.DataFrame,
-    customer_df: pd.DataFrame,
+    file1_df: pd.DataFrame,
+    file2_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    以 (客戶, 條碼, 門市) 對齊；差異 = 系統 − 客戶。
-    輸出：客戶、條碼、門市、系統庫存、客戶庫存、庫存差異、系統銷售、客戶銷售、銷售差異
+    以 (客戶, 條碼, 門市) 對齊；差異 = 檔案1 − 檔案2。
+    輸出：客戶、條碼、門市、檔案1庫存、檔案2庫存、庫存差異、檔案1銷售、檔案2銷售、銷售差異
     """
-    s = aggregate_simple_inventory_sales(system_df).rename(
-        columns={"庫存": "系統庫存", "銷售": "系統銷售"}
+    f1 = aggregate_simple_inventory_sales(file1_df).rename(
+        columns={"庫存": "檔案1庫存", "銷售": "檔案1銷售"}
     )
-    c = aggregate_simple_inventory_sales(customer_df).rename(
-        columns={"庫存": "客戶庫存", "銷售": "客戶銷售"}
+    f2 = aggregate_simple_inventory_sales(file2_df).rename(
+        columns={"庫存": "檔案2庫存", "銷售": "檔案2銷售"}
     )
-    m = s.merge(c, on=["客戶", "條碼", "門市"], how="outer")
-    for col in ["系統庫存", "系統銷售", "客戶庫存", "客戶銷售"]:
+    m = f1.merge(f2, on=["客戶", "條碼", "門市"], how="outer")
+    for col in ["檔案1庫存", "檔案1銷售", "檔案2庫存", "檔案2銷售"]:
         if col not in m.columns:
             m[col] = 0
         m[col] = _coerce_qty(m[col])
-    m["庫存差異"] = m["系統庫存"] - m["客戶庫存"]
-    m["銷售差異"] = m["系統銷售"] - m["客戶銷售"]
+    m["庫存差異"] = m["檔案1庫存"] - m["檔案2庫存"]
+    m["銷售差異"] = m["檔案1銷售"] - m["檔案2銷售"]
     want = [
         "客戶",
         "條碼",
         "門市",
-        "系統庫存",
-        "客戶庫存",
+        "檔案1庫存",
+        "檔案2庫存",
         "庫存差異",
-        "系統銷售",
-        "客戶銷售",
+        "檔案1銷售",
+        "檔案2銷售",
         "銷售差異",
     ]
-    return m[want].sort_values(["客戶", "條碼", "門市"]).reset_index(drop=True)
+    out = m[want].sort_values(["客戶", "條碼", "門市"]).reset_index(drop=True)
+    for c in ["檔案1庫存", "檔案2庫存", "庫存差異", "檔案1銷售", "檔案2銷售", "銷售差異"]:
+        if c in out.columns:
+            out[c] = _to_int_series(out[c])
+    return out
