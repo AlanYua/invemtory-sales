@@ -84,6 +84,25 @@ try:
     else:
         rep = rep_full
 
+    s1_inv = int(rep_full["檔案1庫存"].sum())
+    s1_sale = int(rep_full["檔案1銷售"].sum())
+    s2_inv = int(rep_full["檔案2庫存"].sum())
+    s2_sale = int(rep_full["檔案2銷售"].sum())
+    st.subheader("全檔合計（與 Excel 全表加總一致；含僅單邊出現的列）")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("檔案1 庫存", f"{s1_inv:,}")
+    m2.metric("檔案1 銷售", f"{s1_sale:,}")
+    m3.metric("檔案2 庫存", f"{s2_inv:,}")
+    m4.metric("檔案2 銷售", f"{s2_sale:,}")
+    st.caption(
+        f"庫存差額（檔1−檔2）**{s1_inv - s2_inv:,}**　｜　銷售差額 **{s1_sale - s2_sale:,}**"
+    )
+    if only_diff:
+        st.warning(
+            "已勾選「僅顯示有差異」：下方表格的「檔案1庫存／銷售」直欄加總 **通常不等於** "
+            "上面全檔合計，因為兩邊數字完全相同的列被隱藏了，但那些列仍算在檔案總量裡。"
+        )
+
     st.subheader("差異報表" + ("（僅有差異）" if only_diff else "（全部鍵）"))
     st.caption(f"列數：{len(rep):,}（全部合併列數 {len(rep_full):,}）")
     st.dataframe(

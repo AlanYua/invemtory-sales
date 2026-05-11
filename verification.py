@@ -15,6 +15,25 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _coerce_qty(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
+
+def _normalize_barcode_series(s: pd.Series) -> pd.Series:
+    """
+    Excel 常把條碼讀成 float；直接 astype(str) 會變 '4710001234567.0' 或科學記號，
+    與另一份以文字儲存的條碼對不起來，merge 鍵錯誤會讓加總與差異全錯。
+    能安全轉成整數的數值欄一律輸出十進位字串（不含小數點）。
+    """
+    s = s.astype(object)
+    num = pd.to_numeric(s, errors="coerce")
+    r = num.round(0)
+    is_whole = num.notna() & ((num - r).abs() < 1e-9)
+    text = s.astype(str).str.strip()
+    for bad in ("nan", "None", "<NA>"):
+        text = text.replace({bad: ""})
+    out = text.copy()
+    out.loc[is_whole] = r.loc[is_whole].astype("Int64").astype(str)
+    return out
+
+
 def _to_int_series(s: pd.Series) -> pd.Series:
     """
     將數值欄轉成整數（nullable Int64），避免輸出/Excel 顯示 0.0000。
@@ -63,7 +82,7 @@ def load_simple_inventory_sales(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "客戶": d[c_cu].astype(str).str.strip(),  # type: ignore[index]
-            "條碼": d[c_bc].astype(str).str.strip(),  # type: ignore[index]
+            "條碼": _normalize_barcode_series(d[c_bc]),  # type: ignore[index]
             "門市": d[c_st].astype(str).str.strip(),  # type: ignore[index]
             "庫存": _coerce_qty(d[c_inv]),  # type: ignore[index]
             "銷售": _coerce_qty(d[c_sale]),  # type: ignore[index]
@@ -80,7 +99,7 @@ def aggregate_simple_inventory_sales(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"缺少欄位: {missing}；目前欄位: {list(d.columns)}")
     x = d[VERIFY_SIMPLE_COLS].copy()
     x["客戶"] = x["客戶"].astype(str).str.strip()
-    x["條碼"] = x["條碼"].astype(str).str.strip()
+    x["條碼"] = _normalize_barcode_series(x["條碼"])
     x["門市"] = x["門市"].astype(str).str.strip()
     x["庫存"] = _coerce_qty(x["庫存"])
     x["銷售"] = _coerce_qty(x["銷售"])
